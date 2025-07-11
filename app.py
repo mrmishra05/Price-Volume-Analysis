@@ -124,6 +124,11 @@ def load_data_from_google_sheets(sheet_url):
         # Read the CSV data with proper error handling
         df = pd.read_csv(csv_url, encoding='utf-8')
         
+        # Debug: Initial DataFrame state
+        st.sidebar.write("Debug: DataFrame loaded. Is empty?", df.empty)
+        st.sidebar.write("Debug: DataFrame columns (raw):", df.columns.tolist())
+        st.sidebar.write("Debug: DataFrame dtypes (raw):", df.dtypes)
+
         # Store original column names for debugging
         original_columns = df.columns.tolist()
         st.sidebar.write("**Original Columns Found:**")
@@ -132,7 +137,11 @@ def load_data_from_google_sheets(sheet_url):
         # Clean column names (lowercase, trim, replace spaces with underscores)
         df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
         
-        # Store cleaned column names for debugging
+        # Check if columns are empty after cleaning (e.g., if CSV was truly empty)
+        if df.columns.empty:
+            st.error("❌ The CSV file appears to be empty or malformed (no columns found after cleaning).")
+            return None
+
         cleaned_columns = df.columns.tolist()
         st.sidebar.write("**Cleaned Columns:**")
         st.sidebar.write(cleaned_columns)
@@ -149,6 +158,9 @@ def load_data_from_google_sheets(sheet_url):
         if date_column:
             df['date'] = pd.to_datetime(df[date_column], errors='coerce')
             df = df.dropna(subset=['date']) # Remove rows with invalid dates
+            if df['date'].empty: # Check if all dates became NaT after coercion
+                st.error("❌ All dates in the 'date' column are invalid. Please check date format in your sheet.")
+                return None
         else:
             st.sidebar.error("❌ No date column found! Please ensure your sheet has a column with dates named one of: " + ", ".join(date_candidates))
             return None
@@ -211,6 +223,8 @@ def load_data_from_google_sheets(sheet_url):
             if col not in df.columns:
                 st.error(f"❌ Missing required column: '{col}'. Please check your raw data headers.")
                 return None
+            # Debug: Check dtype before isnull().all()
+            st.sidebar.write(f"Debug: Checking column '{col}'. Dtype: {df[col].dtype}")
             if df[col].isnull().all():
                 st.error(f"❌ Required column '{col}' is entirely empty (all NaN). Please check your raw data.")
                 return None
@@ -221,25 +235,30 @@ def load_data_from_google_sheets(sheet_url):
         # This directly addresses the "truth value of a Series is ambiguous" if those columns contain mixed types
         # or non-string/non-numeric objects that pandas cannot implicitly convert to strings for concatenation.
         
-        if 'symbol' in df.columns:
-            df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
-        else:
-            st.error("Internal Error: 'symbol' column missing before unique_id creation.")
+        # Ensure symbol column exists and is not empty before cleaning
+        if 'symbol' not in df.columns or df['symbol'].empty: # Check if the Series is empty
+            st.error("Internal Error: 'symbol' column is missing or became empty. Cannot create unique_id.")
             return None
-
-        if 'series' in df.columns:
-            df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
-        else:
-            df['series'] = 'EQ' # Default to 'EQ' if series column was not found initially
-            st.sidebar.info("Series column not found in raw data, defaulting to 'EQ' for all entries.")
-
+        df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
+        
+        # Ensure series column exists and is not empty before cleaning
+        if 'series' not in df.columns or df['series'].empty: # Check if the Series is empty
+            st.warning("Series column not found or became empty, defaulting to 'EQ' for all entries.")
+            df['series'] = 'EQ'
+        df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
+        
         st.sidebar.write("Debug: Symbol and Series columns processed to clean strings.")
         st.sidebar.write("Debug: Sample symbols (cleaned):", df['symbol'].head().tolist())
         st.sidebar.write("Debug: Sample series (cleaned):", df['series'].head().tolist())
 
         # Create unique_id after ensuring symbol and series are clean strings
-        df['unique_id'] = df['symbol'] + '-' + df['series']
-        st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
+        # This check is crucial to prevent the "ambiguous truth value" error
+        if not df['symbol'].empty and not df['series'].empty:
+            df['unique_id'] = df['symbol'] + '-' + df['series']
+            st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
+        else:
+            st.error("Internal Error: 'symbol' or 'series' column became empty after cleaning. Cannot create unique_id.")
+            return None
 
         # Ensure unique (symbol, series, date) pairs and sort data
         df = df.sort_values(by=['unique_id', 'date']).drop_duplicates(subset=['unique_id', 'date'], keep='last')
