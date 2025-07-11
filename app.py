@@ -187,23 +187,45 @@ def categorize_stocks(df):
     """Categorize stocks based on price and delivery volume patterns"""
     df = df.copy()
     
+    # Check for required columns
+    required_cols = ['price_change_pct']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        st.error(f"Missing required columns: {missing_cols}")
+        return df
+    
     # Define thresholds
     PRICE_THRESHOLD = 0.5  # 0.5%
     DELIV_THRESHOLD = 5    # 5%
     
     # Calculate delivery volume changes (if available)
     deliv_prev_cols = [col for col in df.columns if 'deliv_qty' in col and any(suffix in col for suffix in ['prev', 'week_ago', 'month_ago', 'start'])]
-    if deliv_prev_cols:
-        df['deliv_change_pct'] = ((df['deliv_qty'] - df[deliv_prev_cols[0]]) / df[deliv_prev_cols[0]]) * 100
+    if deliv_prev_cols and 'deliv_qty' in df.columns:
+        # Avoid division by zero
+        prev_col = deliv_prev_cols[0]
+        df['deliv_change_pct'] = df.apply(
+            lambda row: ((row['deliv_qty'] - row[prev_col]) / row[prev_col]) * 100 
+            if pd.notna(row[prev_col]) and row[prev_col] != 0 else 0, 
+            axis=1
+        )
     else:
         df['deliv_change_pct'] = 0
     
     # Categorize based on price and delivery movements
     def get_category(row):
-        price_up = row['price_change_pct'] > PRICE_THRESHOLD
-        price_down = row['price_change_pct'] < -PRICE_THRESHOLD
-        deliv_up = row['deliv_change_pct'] > DELIV_THRESHOLD
-        deliv_down = row['deliv_change_pct'] < -DELIV_THRESHOLD
+        # Handle NaN values
+        price_change = row.get('price_change_pct', 0)
+        deliv_change = row.get('deliv_change_pct', 0)
+        
+        if pd.isna(price_change):
+            price_change = 0
+        if pd.isna(deliv_change):
+            deliv_change = 0
+        
+        price_up = price_change > PRICE_THRESHOLD
+        price_down = price_change < -PRICE_THRESHOLD
+        deliv_up = deliv_change > DELIV_THRESHOLD
+        deliv_down = deliv_change < -DELIV_THRESHOLD
         
         if price_up and deliv_up:
             return 'Price Up + Delivery Up', 'STRONG BUY', '#10B981'
@@ -277,42 +299,15 @@ def create_scatter_plot(df):
     else:
         # Fallback to Streamlit native chart
         st.subheader("Price Change vs Delivery Volume Change")
-        chart_data = df[['price_change_pct', 'deliv_change_pct']].copy()
-        st.scatter_chart(chart_data.rename(columns={
-            'price_change_pct': 'Price Change (%)',
-            'deliv_change_pct': 'Delivery Volume Change (%)'
-        }))
+        if 'deliv_change_pct' in df.columns:
+            chart_data = df[['price_change_pct', 'deliv_change_pct']].copy()
+            st.scatter_chart(chart_data.rename(columns={
+                'price_change_pct': 'Price Change (%)',
+                'deliv_change_pct': 'Delivery Volume Change (%)'
+            }))
+        else:
+            st.info("Delivery volume change data not available for scatter plot")
         return None
-
-def create_sample_data():
-    """Create sample data for demonstration"""
-    np.random.seed(42)  # For reproducible results
-    
-    symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 'LT', 'WIPRO', 'MARUTI']
-    dates = pd.date_range(start='2025-01-01', end='2025-01-10', freq='D')
-    
-    data = []
-    for date in dates:
-        for symbol in symbols:
-            base_price = np.random.uniform(100, 2000)
-            price_change = np.random.uniform(-5, 5)
-            close_price = base_price * (1 + price_change/100)
-            prev_close = base_price
-            volume = np.random.randint(100000, 5000000)
-            deliv_qty = int(volume * np.random.uniform(0.3, 0.8))
-            deliv_per = (deliv_qty / volume) * 100
-            
-            data.append({
-                'symbol': symbol,
-                'date': date,
-                'prev_close': prev_close,
-                'close_price': close_price,
-                'volume': volume,
-                'deliv_qty': deliv_qty,
-                'deliv_per': deliv_per
-            })
-    
-    return pd.DataFrame(data)
 
 # Main app
 def main():
@@ -335,32 +330,46 @@ def main():
         help="Make sure your Google Sheet is publicly accessible"
     )
     
-    # Sample data option
-    use_sample_data = st.sidebar.checkbox("Use Sample Data", value=True)
-    
-    if use_sample_data:
-        df = create_sample_data()
-    elif sheet_url:
-        df = load_data_from_google_sheets(sheet_url)
-        if df is None:
-            st.error("Failed to load data from Google Sheets")
-            return
-    else:
-        st.warning("Please provide a Google Sheets URL or use sample data")
+    # Check if URL is provided
+    if not sheet_url:
+        st.warning("Please provide a Google Sheets URL to load data")
+        st.info("📝 **Instructions:**\n1. Make sure your Google Sheet is publicly accessible\n2. Copy the full URL from your browser\n3. Paste it in the sidebar")
         return
+    
+    # Load data
+    df = load_data_from_google_sheets(sheet_url)
+    if df is None:
+        st.error("Failed to load data from Google Sheets")
+        st.info("**Troubleshooting:**\n1. Check if the sheet is publicly accessible\n2. Verify the URL is correct\n3. Ensure the sheet contains the required columns")
+        return
+    
+    # Validate data
+    if df.empty:
+        st.error("No data available in the sheet")
+        return
+    
+    # Display data info
+    st.sidebar.success(f"✅ Data loaded: {len(df)} rows")
     
     # Date and timeframe selection
     st.sidebar.subheader("Analysis Parameters")
     
-    # Get available dates
-    available_dates = sorted(df['date'].unique())
+    # Get available dates and remove NaT values
+    available_dates = df['date'].dropna().unique()
+    available_dates = sorted([d for d in available_dates if pd.notna(d)])
+    
+    if len(available_dates) == 0:
+        st.error("No valid dates found in the data")
+        return
+    
     max_date = max(available_dates)
+    min_date = min(available_dates)
     
     # Date selection
     selected_date = st.sidebar.date_input(
         "Select Date",
         value=max_date,
-        min_value=min(available_dates),
+        min_value=min_date,
         max_value=max_date
     )
     selected_date = pd.to_datetime(selected_date)
@@ -424,24 +433,30 @@ def main():
     
     # Main dashboard
     if not categorized_df.empty:
-        # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            strong_buy_count = len(categorized_df[categorized_df['signal_strength'] == 'STRONG BUY'])
-            st.metric("Strong Buy Signals", strong_buy_count)
-        
-        with col2:
-            accumulation_count = len(categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION'])
-            st.metric("Accumulation Signals", accumulation_count)
-        
-        with col3:
-            avg_price_change = categorized_df['price_change_pct'].mean()
-            st.metric("Avg Price Change", f"{avg_price_change:.2f}%")
-        
-        with col4:
-            total_stocks = len(categorized_df)
-            st.metric("Total Stocks", total_stocks)
+        # Check for required columns before creating metrics
+        required_metrics_cols = ['signal_strength', 'price_change_pct']
+        if all(col in categorized_df.columns for col in required_metrics_cols):
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                strong_buy_count = len(categorized_df[categorized_df['signal_strength'] == 'STRONG BUY'])
+                st.metric("Strong Buy Signals", strong_buy_count)
+            
+            with col2:
+                accumulation_count = len(categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION'])
+                st.metric("Accumulation Signals", accumulation_count)
+            
+            with col3:
+                avg_price_change = categorized_df['price_change_pct'].mean()
+                st.metric("Avg Price Change", f"{avg_price_change:.2f}%")
+            
+            with col4:
+                total_stocks = len(categorized_df)
+                st.metric("Total Stocks", total_stocks)
+        else:
+            st.error("Missing required columns for metrics analysis")
+            return
         
         # Charts
         col1, col2 = st.columns(2)
@@ -483,7 +498,11 @@ def main():
         # Sort options
         sort_col1, sort_col2 = st.columns(2)
         with sort_col1:
-            sort_by = st.selectbox("Sort by", ['price_change_pct', 'close_price', 'volume', 'deliv_qty'])
+            available_sort_cols = [col for col in ['price_change_pct', 'close_price', 'volume', 'deliv_qty'] if col in categorized_df.columns]
+            if available_sort_cols:
+                sort_by = st.selectbox("Sort by", available_sort_cols)
+            else:
+                sort_by = 'price_change_pct'
         with sort_col2:
             sort_order = st.selectbox("Sort order", ['Descending', 'Ascending'])
         
@@ -493,14 +512,20 @@ def main():
         
         # Display table with custom formatting
         display_columns = ['symbol', 'close_price', 'price_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
-        if all(col in display_df.columns for col in display_columns):
-            display_df_formatted = display_df[display_columns].copy()
+        available_display_cols = [col for col in display_columns if col in display_df.columns]
+        
+        if available_display_cols:
+            display_df_formatted = display_df[available_display_cols].copy()
             
-            # Format columns
-            display_df_formatted['close_price'] = display_df_formatted['close_price'].apply(lambda x: f"₹{x:.2f}")
-            display_df_formatted['price_change_pct'] = display_df_formatted['price_change_pct'].apply(lambda x: f"{x:.2f}%")
-            display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,}")
-            display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,}")
+            # Format columns if they exist
+            if 'close_price' in display_df_formatted.columns:
+                display_df_formatted['close_price'] = display_df_formatted['close_price'].apply(lambda x: f"₹{x:.2f}" if pd.notna(x) else "N/A")
+            if 'price_change_pct' in display_df_formatted.columns:
+                display_df_formatted['price_change_pct'] = display_df_formatted['price_change_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+            if 'volume' in display_df_formatted.columns:
+                display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
+            if 'deliv_qty' in display_df_formatted.columns:
+                display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
             
             st.dataframe(display_df_formatted, use_container_width=True)
         else:
