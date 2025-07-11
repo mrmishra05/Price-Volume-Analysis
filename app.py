@@ -131,7 +131,10 @@ def load_data_from_google_sheets(sheet_url):
 
         st.sidebar.write("Debug: DataFrame loaded. Is empty?", df.empty)
         st.sidebar.write("Debug: DataFrame columns (raw):", df.columns.tolist())
-        st.sidebar.write("Debug: DataFrame dtypes (raw):", df.dtypes)
+        # Debug: Display dtypes more robustly
+        st.sidebar.write("Debug: DataFrame dtypes (raw):")
+        for col, dtype in df.dtypes.items():
+            st.sidebar.write(f"- {col}: {dtype}")
 
         # Store original column names for debugging
         original_columns = df.columns.tolist()
@@ -241,29 +244,36 @@ def load_data_from_google_sheets(sheet_url):
         # This addresses the "truth value of a Series is ambiguous" if those columns contain mixed types
         # or non-string/non-numeric objects that pandas cannot implicitly convert to strings for concatenation.
         
-        # Ensure symbol column is not empty before cleaning
-        if df['symbol'].empty:
-            st.error("Internal Error: 'symbol' column is empty after initial processing. Cannot create unique_id.")
-            return None
-        df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
-        
-        # Ensure series column is not empty before cleaning
-        if df['series'].empty:
-            st.warning("Series column is empty after initial processing, defaulting to 'EQ' for all entries.")
-            df['series'] = 'EQ'
-        df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
-        
-        st.sidebar.write("Debug: Symbol and Series columns processed to clean strings.")
-        st.sidebar.write("Debug: Sample symbols (cleaned):", df['symbol'].head().tolist())
-        st.sidebar.write("Debug: Sample series (cleaned):", df['series'].head().tolist())
+        try:
+            # Ensure symbol column is not empty before cleaning
+            # Use .any() to check if there are any non-False values (i.e., not entirely empty/NaN)
+            if df['symbol'].empty or not df['symbol'].astype(bool).any():
+                st.error("Internal Error: 'symbol' column is empty or contains only False-like values after initial processing. Cannot create unique_id.")
+                return None
+            df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
+            
+            # Ensure series column is not empty before cleaning
+            if df['series'].empty or not df['series'].astype(bool).any():
+                st.warning("Series column is empty or contains only False-like values after initial processing, defaulting to 'EQ' for all entries.")
+                df['series'] = 'EQ'
+            df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
+            
+            st.sidebar.write("Debug: Symbol and Series columns processed to clean strings.")
+            st.sidebar.write("Debug: Sample symbols (cleaned):", df['symbol'].head().tolist())
+            st.sidebar.write("Debug: Sample series (cleaned):", df['series'].head().tolist())
 
-        # Create unique_id after ensuring symbol and series are clean strings
-        # This check is crucial to prevent the "ambiguous truth value" error
-        if not df['symbol'].empty and not df['series'].empty: # This check is already here, but good to re-emphasize
-            df['unique_id'] = df['symbol'] + '-' + df['series']
-            st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
-        else:
-            st.error("Internal Error: 'symbol' or 'series' column became empty after cleaning. Cannot create unique_id.")
+            # Create unique_id after ensuring symbol and series are clean strings
+            # This check is crucial to prevent the "ambiguous truth value" error
+            # Using .any() for explicit boolean check on Series
+            if df['symbol'].astype(bool).any() and df['series'].astype(bool).any(): # Explicitly cast to bool and then use .any()
+                df['unique_id'] = df['symbol'] + '-' + df['series']
+                st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
+            else:
+                st.error("Internal Error: 'symbol' or 'series' column became empty after cleaning. Cannot create unique_id.")
+                return None
+        except Exception as e:
+            st.error(f"Error during symbol/series cleaning or unique_id creation: {e}")
+            st.write(f"Debug: Error type: {type(e)}, Message: {e}")
             return None
 
         # Ensure unique (symbol, series, date) pairs and sort data
