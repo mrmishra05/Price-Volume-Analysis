@@ -124,7 +124,11 @@ def load_data_from_google_sheets(sheet_url):
         # Read the CSV data with proper error handling
         df = pd.read_csv(csv_url, encoding='utf-8')
         
-        # Debug: Initial DataFrame state
+        # --- Initial DataFrame checks ---
+        if df.empty:
+            st.error("❌ The CSV file loaded is empty. Please ensure your Google Sheet contains data.")
+            return None
+
         st.sidebar.write("Debug: DataFrame loaded. Is empty?", df.empty)
         st.sidebar.write("Debug: DataFrame columns (raw):", df.columns.tolist())
         st.sidebar.write("Debug: DataFrame dtypes (raw):", df.dtypes)
@@ -137,7 +141,7 @@ def load_data_from_google_sheets(sheet_url):
         # Clean column names (lowercase, trim, replace spaces with underscores)
         df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
         
-        # Check if columns are empty after cleaning (e.g., if CSV was truly empty)
+        # Check if columns are empty after cleaning (e.g., if CSV was truly malformed)
         if df.columns.empty:
             st.error("❌ The CSV file appears to be empty or malformed (no columns found after cleaning).")
             return None
@@ -159,7 +163,7 @@ def load_data_from_google_sheets(sheet_url):
             df['date'] = pd.to_datetime(df[date_column], errors='coerce')
             df = df.dropna(subset=['date']) # Remove rows with invalid dates
             if df['date'].empty: # Check if all dates became NaT after coercion
-                st.error("❌ All dates in the 'date' column are invalid. Please check date format in your sheet.")
+                st.error("❌ All dates in the 'date' column are invalid or missing. Please check date format in your sheet.")
                 return None
         else:
             st.sidebar.error("❌ No date column found! Please ensure your sheet has a column with dates named one of: " + ", ".join(date_candidates))
@@ -223,8 +227,10 @@ def load_data_from_google_sheets(sheet_url):
             if col not in df.columns:
                 st.error(f"❌ Missing required column: '{col}'. Please check your raw data headers.")
                 return None
-            # Debug: Check dtype before isnull().all()
-            st.sidebar.write(f"Debug: Checking column '{col}'. Dtype: {df[col].dtype}")
+            # IMPORTANT: Check if the Series is empty before checking isnull().all()
+            if df[col].empty:
+                st.error(f"❌ Required column '{col}' is empty after initial processing. Cannot proceed.")
+                return None
             if df[col].isnull().all():
                 st.error(f"❌ Required column '{col}' is entirely empty (all NaN). Please check your raw data.")
                 return None
@@ -232,18 +238,18 @@ def load_data_from_google_sheets(sheet_url):
         st.sidebar.write("Debug: All required columns are present and not entirely NaN.")
 
         # --- CRITICAL FIX: Ensure symbol and series are clean strings before unique_id creation ---
-        # This directly addresses the "truth value of a Series is ambiguous" if those columns contain mixed types
+        # This addresses the "truth value of a Series is ambiguous" if those columns contain mixed types
         # or non-string/non-numeric objects that pandas cannot implicitly convert to strings for concatenation.
         
-        # Ensure symbol column exists and is not empty before cleaning
-        if 'symbol' not in df.columns or df['symbol'].empty: # Check if the Series is empty
-            st.error("Internal Error: 'symbol' column is missing or became empty. Cannot create unique_id.")
+        # Ensure symbol column is not empty before cleaning
+        if df['symbol'].empty:
+            st.error("Internal Error: 'symbol' column is empty after initial processing. Cannot create unique_id.")
             return None
         df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
         
-        # Ensure series column exists and is not empty before cleaning
-        if 'series' not in df.columns or df['series'].empty: # Check if the Series is empty
-            st.warning("Series column not found or became empty, defaulting to 'EQ' for all entries.")
+        # Ensure series column is not empty before cleaning
+        if df['series'].empty:
+            st.warning("Series column is empty after initial processing, defaulting to 'EQ' for all entries.")
             df['series'] = 'EQ'
         df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
         
@@ -253,7 +259,7 @@ def load_data_from_google_sheets(sheet_url):
 
         # Create unique_id after ensuring symbol and series are clean strings
         # This check is crucial to prevent the "ambiguous truth value" error
-        if not df['symbol'].empty and not df['series'].empty:
+        if not df['symbol'].empty and not df['series'].empty: # This check is already here, but good to re-emphasize
             df['unique_id'] = df['symbol'] + '-' + df['series']
             st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
         else:
@@ -494,7 +500,7 @@ def main():
     # Google Sheets URL input
     sheet_url = st.sidebar.text_input(
         "Google Sheets URL (Raw Data)",
-        placeholder="https://docs.google.com/spreadsheets/d/1rCqDMaUwrT2mHKeHGjyWAA6vZ5qel-AVg7Atk1ef68Y/edit?gid=988176658#gid=988176658",
+        placeholder="Paste your Google Sheets URL here (e.g., your 'NSE_2025' sheet)",
         help="Make sure your Google Sheet is publicly accessible. This should be the URL of your raw data sheet."
     )
     
