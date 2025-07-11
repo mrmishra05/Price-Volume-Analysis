@@ -102,22 +102,28 @@ st.markdown("""
 def load_data_from_google_sheets(sheet_url):
     """Load data from Google Sheets using the public CSV export URL"""
     try:
-        # Convert Google Sheets URL to CSV export URL
-        if '/edit' in sheet_url:
+        # Extract sheet ID and GID from the URL
+        if '/d/' in sheet_url:
             sheet_id = sheet_url.split('/d/')[1].split('/')[0]
-            csv_url = f"https://docs.google.com/spreadsheets/d/1rCqDMaUwrT2mHKeHGjyWAA6vZ5qel-AVg7Atk1ef68Y/edit?gid=988176658#gid=988176658"
+            
+            # Extract GID if present
+            if 'gid=' in sheet_url:
+                gid = sheet_url.split('gid=')[1].split('&')[0].split('#')[0]
+                csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+            else:
+                csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
         else:
             csv_url = sheet_url
         
-        # Read the CSV data
-        df = pd.read_csv(csv_url)
+        # Read the CSV data with proper error handling
+        df = pd.read_csv(csv_url, encoding='utf-8')
         
         # Clean column names
         df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
         
         # Convert date column to datetime
         if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
         
         # Convert numeric columns
         numeric_cols = ['prev_close', 'close_price', 'volume', 'deliv_qty', 'deliv_per']
