@@ -1,13 +1,21 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import requests
 from datetime import datetime, timedelta
 import io
 import base64
+
+# Try to import plotly with error handling
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except ImportError as e:
+    st.error(f"⚠️ Plotly not available: {e}")
+    st.info("📊 Using Streamlit's built-in charts instead")
+    PLOTLY_AVAILABLE = False
 
 # Set page config
 st.set_page_config(
@@ -178,12 +186,9 @@ def categorize_stocks(df):
     DELIV_THRESHOLD = 5    # 5%
     
     # Calculate delivery volume changes (if available)
-    if 'deliv_qty_prev' in df.columns or 'deliv_qty_week_ago' in df.columns or 'deliv_qty_month_ago' in df.columns:
-        deliv_prev_col = [col for col in df.columns if 'deliv_qty' in col and ('prev' in col or 'week_ago' in col or 'month_ago' in col)]
-        if deliv_prev_col:
-            df['deliv_change_pct'] = ((df['deliv_qty'] - df[deliv_prev_col[0]]) / df[deliv_prev_col[0]]) * 100
-        else:
-            df['deliv_change_pct'] = 0
+    deliv_prev_cols = [col for col in df.columns if 'deliv_qty' in col and any(suffix in col for suffix in ['prev', 'week_ago', 'month_ago', 'start'])]
+    if deliv_prev_cols:
+        df['deliv_change_pct'] = ((df['deliv_qty'] - df[deliv_prev_cols[0]]) / df[deliv_prev_cols[0]]) * 100
     else:
         df['deliv_change_pct'] = 0
     
@@ -218,69 +223,101 @@ def create_category_pie_chart(df):
     """Create pie chart for category distribution"""
     category_counts = df['category'].value_counts()
     
-    fig = px.pie(
-        values=category_counts.values,
-        names=category_counts.index,
-        title="Stock Category Distribution",
-        color_discrete_map={
-            'Price Up + Delivery Up': '#10B981',
-            'Price Flat/Down + Delivery Up': '#3B82F6',
-            'Price Down + Delivery Up': '#8B5CF6',
-            'Price Down + Delivery Down': '#EF4444',
-            'Price Up + Delivery Flat/Down': '#F59E0B',
-            'Neutral': '#6B7280'
-        }
-    )
-    return fig
+    if PLOTLY_AVAILABLE:
+        fig = px.pie(
+            values=category_counts.values,
+            names=category_counts.index,
+            title="Stock Category Distribution",
+            color_discrete_map={
+                'Price Up + Delivery Up': '#10B981',
+                'Price Flat/Down + Delivery Up': '#3B82F6',
+                'Price Down + Delivery Up': '#8B5CF6',
+                'Price Down + Delivery Down': '#EF4444',
+                'Price Up + Delivery Flat/Down': '#F59E0B',
+                'Neutral': '#6B7280'
+            }
+        )
+        return fig
+    else:
+        # Fallback to Streamlit native chart
+        st.subheader("Stock Category Distribution")
+        st.bar_chart(category_counts)
+        return None
 
 def create_scatter_plot(df):
     """Create scatter plot for price vs delivery changes"""
-    fig = px.scatter(
-        df, 
-        x='price_change_pct', 
-        y='deliv_change_pct',
-        hover_data=['symbol', 'close_price'],
-        color='category',
-        title="Price Change vs Delivery Volume Change",
-        labels={
+    if PLOTLY_AVAILABLE:
+        fig = px.scatter(
+            df, 
+            x='price_change_pct', 
+            y='deliv_change_pct',
+            hover_data=['symbol', 'close_price'],
+            color='category',
+            title="Price Change vs Delivery Volume Change",
+            labels={
+                'price_change_pct': 'Price Change (%)',
+                'deliv_change_pct': 'Delivery Volume Change (%)'
+            },
+            color_discrete_map={
+                'Price Up + Delivery Up': '#10B981',
+                'Price Flat/Down + Delivery Up': '#3B82F6',
+                'Price Down + Delivery Up': '#8B5CF6',
+                'Price Down + Delivery Down': '#EF4444',
+                'Price Up + Delivery Flat/Down': '#F59E0B',
+                'Neutral': '#6B7280'
+            }
+        )
+        return fig
+    else:
+        # Fallback to Streamlit native chart
+        st.subheader("Price Change vs Delivery Volume Change")
+        chart_data = df[['price_change_pct', 'deliv_change_pct']].copy()
+        st.scatter_chart(chart_data.rename(columns={
             'price_change_pct': 'Price Change (%)',
             'deliv_change_pct': 'Delivery Volume Change (%)'
-        },
-        color_discrete_map={
-            'Price Up + Delivery Up': '#10B981',
-            'Price Flat/Down + Delivery Up': '#3B82F6',
-            'Price Down + Delivery Up': '#8B5CF6',
-            'Price Down + Delivery Down': '#EF4444',
-            'Price Up + Delivery Flat/Down': '#F59E0B',
-            'Neutral': '#6B7280'
-        }
-    )
-    return fig
+        }))
+        return None
 
-def get_signal_html(signal):
-    """Get HTML for signal badge"""
-    signal_classes = {
-        'STRONG BUY': 'signal-strong-buy',
-        'WEAK BUY': 'signal-weak-buy',
-        'ACCUMULATION': 'signal-accumulation',
-        'BOTTOM FISHING': 'signal-bottom-fishing',
-        'WEAK SELL': 'signal-weak-sell',
-        'HOLD': 'signal-hold'
-    }
-    css_class = signal_classes.get(signal, 'signal-hold')
-    return f'<span class="{css_class}">{signal}</span>'
-
-def download_csv(df, filename):
-    """Create download link for CSV"""
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">Download CSV</a>'
-    return href
+def create_sample_data():
+    """Create sample data for demonstration"""
+    np.random.seed(42)  # For reproducible results
+    
+    symbols = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'BHARTIARTL', 'LT', 'WIPRO', 'MARUTI']
+    dates = pd.date_range(start='2025-01-01', end='2025-01-10', freq='D')
+    
+    data = []
+    for date in dates:
+        for symbol in symbols:
+            base_price = np.random.uniform(100, 2000)
+            price_change = np.random.uniform(-5, 5)
+            close_price = base_price * (1 + price_change/100)
+            prev_close = base_price
+            volume = np.random.randint(100000, 5000000)
+            deliv_qty = int(volume * np.random.uniform(0.3, 0.8))
+            deliv_per = (deliv_qty / volume) * 100
+            
+            data.append({
+                'symbol': symbol,
+                'date': date,
+                'prev_close': prev_close,
+                'close_price': close_price,
+                'volume': volume,
+                'deliv_qty': deliv_qty,
+                'deliv_per': deliv_per
+            })
+    
+    return pd.DataFrame(data)
 
 # Main app
 def main():
     st.markdown('<h1 class="main-header">📈 NSE Stock Analysis Dashboard</h1>', unsafe_allow_html=True)
     st.markdown('<p class="sub-header">Analyze price and delivery volume movement patterns for strategic insights</p>', unsafe_allow_html=True)
+    
+    # Display plotly status
+    if PLOTLY_AVAILABLE:
+        st.success("✅ Plotly charts enabled")
+    else:
+        st.warning("⚠️ Using Streamlit native charts (Plotly not available)")
     
     # Sidebar for inputs
     st.sidebar.title("Configuration")
@@ -296,19 +333,7 @@ def main():
     use_sample_data = st.sidebar.checkbox("Use Sample Data", value=True)
     
     if use_sample_data:
-        # Create sample data
-        sample_data = {
-            'symbol': ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK', 'SBIN'],
-            'date': ['2025-01-10'] * 6,
-            'prev_close': [1250.5, 3420.8, 1580.2, 1680.3, 1245.6, 820.4],
-            'close_price': [1275.3, 3445.2, 1595.8, 1672.1, 1258.9, 825.7],
-            'volume': [2500000, 1200000, 1800000, 1500000, 2200000, 3500000],
-            'deliv_qty': [1200000, 800000, 900000, 750000, 1100000, 1400000],
-            'deliv_per': [48.0, 66.7, 50.0, 50.0, 50.0, 40.0]
-        }
-        df = pd.DataFrame(sample_data)
-        df['date'] = pd.to_datetime(df['date'])
-    
+        df = create_sample_data()
     elif sheet_url:
         df = load_data_from_google_sheets(sheet_url)
         if df is None:
@@ -416,12 +441,20 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            fig_pie = create_category_pie_chart(categorized_df)
-            st.plotly_chart(fig_pie, use_container_width=True)
+            if PLOTLY_AVAILABLE:
+                fig_pie = create_category_pie_chart(categorized_df)
+                if fig_pie:
+                    st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                create_category_pie_chart(categorized_df)
         
         with col2:
-            fig_scatter = create_scatter_plot(categorized_df)
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            if PLOTLY_AVAILABLE:
+                fig_scatter = create_scatter_plot(categorized_df)
+                if fig_scatter:
+                    st.plotly_chart(fig_scatter, use_container_width=True)
+            else:
+                create_scatter_plot(categorized_df)
         
         # Top movers
         st.subheader("Top Movers")
@@ -454,22 +487,25 @@ def main():
         
         # Display table with custom formatting
         display_columns = ['symbol', 'close_price', 'price_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
-        display_df_formatted = display_df[display_columns].copy()
-        
-        # Format columns
-        display_df_formatted['close_price'] = display_df_formatted['close_price'].apply(lambda x: f"₹{x:.2f}")
-        display_df_formatted['price_change_pct'] = display_df_formatted['price_change_pct'].apply(lambda x: f"{x:.2f}%")
-        display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,}")
-        display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,}")
-        
-        st.dataframe(display_df_formatted, use_container_width=True)
+        if all(col in display_df.columns for col in display_columns):
+            display_df_formatted = display_df[display_columns].copy()
+            
+            # Format columns
+            display_df_formatted['close_price'] = display_df_formatted['close_price'].apply(lambda x: f"₹{x:.2f}")
+            display_df_formatted['price_change_pct'] = display_df_formatted['price_change_pct'].apply(lambda x: f"{x:.2f}%")
+            display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,}")
+            display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,}")
+            
+            st.dataframe(display_df_formatted, use_container_width=True)
+        else:
+            st.dataframe(display_df, use_container_width=True)
         
         # Export functionality
         st.subheader("Export Data")
-        if st.button("Download CSV"):
+        if st.button("Generate CSV Download"):
             csv = categorized_df.to_csv(index=False)
             st.download_button(
-                label="Download CSV",
+                label="📥 Download CSV",
                 data=csv,
                 file_name=f"nse_analysis_{timeframe.lower().replace(' ', '_')}_{selected_date.strftime('%Y%m%d')}.csv",
                 mime="text/csv"
