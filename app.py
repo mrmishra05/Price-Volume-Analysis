@@ -205,20 +205,46 @@ def load_data_from_google_sheets(sheet_url):
 
         # Final validation for essential columns
         required_columns = ['symbol', 'date', 'close_price', 'volume', 'deliv_qty'] 
-        missing_columns = [col for col in required_columns if col not in df.columns or df[col].isnull().all()]
         
-        if missing_columns:
-            st.error(f"❌ Missing or entirely empty required columns after mapping: {missing_columns}. Please check your raw data.")
-            st.write("**Available columns after initial cleaning:**", df.columns.tolist())
-            return None
+        # Check for missing columns and entirely NaN columns
+        for col in required_columns:
+            if col not in df.columns:
+                st.error(f"❌ Missing required column: '{col}'. Please check your raw data headers.")
+                return None
+            if df[col].isnull().all():
+                st.error(f"❌ Required column '{col}' is entirely empty (all NaN). Please check your raw data.")
+                return None
         
-        # Ensure unique (symbol, series, date) pairs and sort data for accurate diff calculations
-        if 'symbol' in df.columns and 'series' in df.columns and 'date' in df.columns:
-            df['unique_id'] = df['symbol'] + '-' + df['series'] # Create a combined ID for grouping
-            df = df.sort_values(by=['unique_id', 'date']).drop_duplicates(subset=['unique_id', 'date'], keep='last')
-            st.sidebar.success(f"✅ Data processed to ensure unique (Symbol, Series, Date) pairs and sorted.")
+        st.sidebar.write("Debug: All required columns are present and not entirely NaN.")
+
+        # --- CRITICAL FIX: Ensure symbol and series are clean strings before unique_id creation ---
+        # This directly addresses the "truth value of a Series is ambiguous" if those columns contain mixed types
+        # or non-string/non-numeric objects that pandas cannot implicitly convert to strings for concatenation.
+        
+        if 'symbol' in df.columns:
+            df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
         else:
-            st.sidebar.warning("Could not create unique ID for proper de-duplication and sorting.")
+            st.error("Internal Error: 'symbol' column missing before unique_id creation.")
+            return None
+
+        if 'series' in df.columns:
+            df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
+        else:
+            df['series'] = 'EQ' # Default to 'EQ' if series column was not found initially
+            st.sidebar.info("Series column not found in raw data, defaulting to 'EQ' for all entries.")
+
+        st.sidebar.write("Debug: Symbol and Series columns processed to clean strings.")
+        st.sidebar.write("Debug: Sample symbols (cleaned):", df['symbol'].head().tolist())
+        st.sidebar.write("Debug: Sample series (cleaned):", df['series'].head().tolist())
+
+        # Create unique_id after ensuring symbol and series are clean strings
+        df['unique_id'] = df['symbol'] + '-' + df['series']
+        st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
+
+        # Ensure unique (symbol, series, date) pairs and sort data
+        df = df.sort_values(by=['unique_id', 'date']).drop_duplicates(subset=['unique_id', 'date'], keep='last')
+        st.sidebar.success(f"✅ Data processed to ensure unique (Symbol, Series, Date) pairs and sorted.")
+        st.sidebar.write("Debug: DataFrame after de-duplication and sorting. Head:", df.head())
 
         # --- Calculate Daily Deltas (Price, Volume, Delivery Quantity) ---
         # These are calculated for every row relative to the previous trading day for that unique stock-series combination
@@ -249,6 +275,11 @@ def load_data_from_google_sheets(sheet_url):
         st.error(f"Error loading or processing data: {str(e)}")
         st.write("**Debug Info:**")
         st.write(f"CSV URL: {csv_url if 'csv_url' in locals() else 'Not generated'}")
+        st.write(f"Error type: {type(e)}")
+        st.write(f"Error message: {e}")
+        if isinstance(e, ValueError) and "truth value of a Series is ambiguous" in str(e):
+            st.write("This error typically means a pandas Series was used in a boolean context (e.g., `if series:`).")
+            st.write("The fix applied aims to ensure 'symbol' and 'series' columns are clean strings before use.")
         return None
 
 def calculate_price_changes(df, timeframe, selected_date, start_date=None, end_date=None):
