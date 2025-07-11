@@ -494,7 +494,7 @@ def main():
     # Google Sheets URL input
     sheet_url = st.sidebar.text_input(
         "Google Sheets URL (Raw Data)",
-        placeholder="Paste your Google Sheets URL here (e.g., your 'NSE_2025' sheet)",
+        placeholder="https://docs.google.com/spreadsheets/d/1rCqDMaUwrT2mHKeHGjyWAA6vZ5qel-AVg7Atk1ef68Y/edit?gid=988176658#gid=988176658",
         help="Make sure your Google Sheet is publicly accessible. This should be the URL of your raw data sheet."
     )
     
