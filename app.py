@@ -241,36 +241,37 @@ def load_data_from_google_sheets(sheet_url):
         st.sidebar.write("Debug: All required columns are present and not entirely NaN.")
 
         # --- CRITICAL FIX: Ensure symbol and series are clean strings before unique_id creation ---
-        # This addresses the "truth value of a Series is ambiguous" if those columns contain mixed types
-        # or non-string/non-numeric objects that pandas cannot implicitly convert to strings for concatenation.
+        # This addresses the "truth value of a Series is ambiguous" error
         
         try:
-            # Ensure symbol column is not empty before cleaning
-            # Use .any() to check if there are any non-False values (i.e., not entirely empty/NaN)
-            if df['symbol'].empty or not df['symbol'].astype(bool).any():
-                st.error("Internal Error: 'symbol' column is empty or contains only False-like values after initial processing. Cannot create unique_id.")
-                return None
-            df['symbol'] = df['symbol'].astype(str).str.strip().replace('nan', '')
+            # Clean symbol column - convert to string and handle NaN values
+            df['symbol'] = df['symbol'].astype(str).str.strip()
+            # Replace 'nan' strings with empty strings and filter out empty ones
+            df['symbol'] = df['symbol'].replace('nan', '').replace('', np.nan)
             
-            # Ensure series column is not empty before cleaning
-            if df['series'].empty or not df['series'].astype(bool).any():
-                st.warning("Series column is empty or contains only False-like values after initial processing, defaulting to 'EQ' for all entries.")
-                df['series'] = 'EQ'
-            df['series'] = df['series'].astype(str).str.strip().replace('nan', '')
+            # Clean series column - convert to string and handle NaN values
+            df['series'] = df['series'].astype(str).str.strip()
+            df['series'] = df['series'].replace('nan', '').replace('', np.nan)
+            
+            # Remove rows where symbol is NaN/empty as they're not useful
+            df = df.dropna(subset=['symbol'])
+            
+            # For series, if NaN, default to 'EQ'
+            df['series'] = df['series'].fillna('EQ')
+            
+            # Final check: ensure we have data after cleaning
+            if df.empty:
+                st.error("❌ No valid data remains after cleaning symbol and series columns.")
+                return None
+            
+            # Now create unique_id safely
+            df['unique_id'] = df['symbol'] + '-' + df['series']
             
             st.sidebar.write("Debug: Symbol and Series columns processed to clean strings.")
             st.sidebar.write("Debug: Sample symbols (cleaned):", df['symbol'].head().tolist())
             st.sidebar.write("Debug: Sample series (cleaned):", df['series'].head().tolist())
-
-            # Create unique_id after ensuring symbol and series are clean strings
-            # This check is crucial to prevent the "ambiguous truth value" error
-            # Using .any() for explicit boolean check on Series
-            if df['symbol'].astype(bool).any() and df['series'].astype(bool).any(): # Explicitly cast to bool and then use .any()
-                df['unique_id'] = df['symbol'] + '-' + df['series']
-                st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
-            else:
-                st.error("Internal Error: 'symbol' or 'series' column became empty after cleaning. Cannot create unique_id.")
-                return None
+            st.sidebar.write("Debug: Unique ID created. Sample unique_ids:", df['unique_id'].head().tolist())
+            
         except Exception as e:
             st.error(f"Error during symbol/series cleaning or unique_id creation: {e}")
             st.write(f"Debug: Error type: {type(e)}, Message: {e}")
@@ -312,9 +313,6 @@ def load_data_from_google_sheets(sheet_url):
         st.write(f"CSV URL: {csv_url if 'csv_url' in locals() else 'Not generated'}")
         st.write(f"Error type: {type(e)}")
         st.write(f"Error message: {e}")
-        if isinstance(e, ValueError) and "truth value of a Series is ambiguous" in str(e):
-            st.write("This error typically means a pandas Series was used in a boolean context (e.g., `if series:`).")
-            st.write("The fix applied aims to ensure 'symbol' and 'series' columns are clean strings before use.")
         return None
 
 def calculate_price_changes(df, timeframe, selected_date, start_date=None, end_date=None):
@@ -576,184 +574,186 @@ def main():
     # Process data based on timeframe
     # This step now calculates the deltas for the *selected* timeframe,
     # or uses the pre-calculated daily deltas for "Today vs Yesterday".
-    processed_df = calculate_price_changes(df, timeframe, selected_date, start_date=start_date_custom, end_date=end_date_custom)
+    processed_df = calculate_price_changes(df, timeframe, selected_date, start_date_custom, end_date_custom)
     
-    if processed_df is None or processed_df.empty:
-        st.error("No data available for the selected parameters after calculating changes.")
-        st.info("Try selecting a different date or timeframe. Ensure data exists for both start and end points of the comparison.")
+    if processed_df.empty:
+        st.warning(f"No data available for the selected timeframe: {timeframe}")
+        st.info("Try selecting a different date or timeframe.")
         return
     
-    # Categorize stocks based on the calculated changes for the selected timeframe
+    # Categorize stocks based on price and delivery volume patterns
     categorized_df = categorize_stocks(processed_df)
     
-    # Filtering options
-    st.sidebar.subheader("Filters")
+    # Main dashboard content
+    st.subheader(f"Analysis for {timeframe}")
+    st.write(f"**Selected Date:** {selected_date.strftime('%Y-%m-%d')}")
+    if timeframe == "Custom Range":
+        st.write(f"**Comparison Period:** {start_date_custom.strftime('%Y-%m-%d')} to {end_date_custom.strftime('%Y-%m-%d')}")
     
-    # Search filter
-    search_term = st.sidebar.text_input("Search Stocks", "")
-    if search_term:
-        categorized_df = categorized_df[categorized_df['symbol'].str.contains(search_term, case=False, na=False) | 
-                                        categorized_df['series'].str.contains(search_term, case=False, na=False).fillna(False)]
+    # Key metrics
+    col1, col2, col3, col4 = st.columns(4)
     
-    # Category filter
-    categories = ['All'] + sorted(list(categorized_df['category'].unique()))
-    selected_category = st.sidebar.selectbox("Filter by Category", categories)
-    if selected_category != 'All':
-        categorized_df = categorized_df[categorized_df['category'] == selected_category]
+    with col1:
+        total_stocks = len(categorized_df)
+        st.metric("Total Stocks", total_stocks)
     
-    # Significant moves only
-    significant_only = st.sidebar.checkbox("Show Significant Moves Only (>2% price change)")
-    if significant_only:
-        # Check if 'price_change_pct' exists before filtering
-        if 'price_change_pct' in categorized_df.columns:
-            categorized_df = categorized_df[abs(categorized_df['price_change_pct'].fillna(0)) > 2]
-        else:
-            st.warning("Cannot filter by significant moves: 'price_change_pct' column not found.")
-
-    # Main dashboard
-    if not categorized_df.empty:
-        # Summary metrics
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            strong_buy_count = len(categorized_df[categorized_df['signal_strength'] == 'STRONG BUY'])
-            st.metric("Price Inc, Del Vol Inc", strong_buy_count)
-        
-        with col2:
-            accumulation_count = len(categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION'])
-            st.metric("Price Not Inc, Del Vol Inc", accumulation_count)
-        
-        with col3:
-            # Ensure price_change_pct exists before calculating mean
-            if 'price_change_pct' in categorized_df.columns:
-                avg_price_change = categorized_df['price_change_pct'].mean()
-                st.metric("Avg Price Change", f"{avg_price_change:.2f}%" if pd.notna(avg_price_change) else "N/A")
-            else:
-                st.metric("Avg Price Change", "N/A")
-        
-        with col4:
-            total_stocks = len(categorized_df)
-            st.metric("Total Stocks", total_stocks)
-        
-        # Charts
-        col1, col2 = st.columns(2) # Keep two columns for potential future charts if needed
-        
-        with col1:
-            if PLOTLY_AVAILABLE:
-                fig_pie = create_category_pie_chart(categorized_df)
-                if fig_pie:
-                    st.plotly_chart(fig_pie, use_container_width=True)
-            else:
-                create_category_pie_chart(categorized_df)
-        
-        with col2:
-            st.info("Additional charts can be added here if needed.") # Placeholder
-            
-        # Top movers
-        st.subheader("Top Movers")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Top Gainers**")
-            # Ensure price_change_pct exists before sorting
-            if 'price_change_pct' in categorized_df.columns:
-                top_gainers = categorized_df.nlargest(5, 'price_change_pct')[['symbol', 'series', 'close_price', 'price_change_pct', 'signal_strength']]
-                top_gainers['Stock'] = top_gainers['symbol'] + '-' + top_gainers['series']
-                st.dataframe(top_gainers[['Stock', 'close_price', 'price_change_pct', 'signal_strength']], use_container_width=True, hide_index=True)
-            else:
-                st.info("Price change data not available for Top Gainers.")
-        
-        with col2:
-            st.write("**Top Losers**")
-            # Ensure price_change_pct exists before sorting
-            if 'price_change_pct' in categorized_df.columns:
-                top_losers = categorized_df.nsmallest(5, 'price_change_pct')[['symbol', 'series', 'close_price', 'price_change_pct', 'signal_strength']]
-                top_losers['Stock'] = top_losers['symbol'] + '-' + top_losers['series']
-                st.dataframe(top_losers[['Stock', 'close_price', 'price_change_pct', 'signal_strength']], use_container_width=True, hide_index=True)
-            else:
-                st.info("Price change data not available for Top Losers.")
-        
-        # Detailed table
-        st.subheader(f"Detailed Analysis ({len(categorized_df)} stocks)")
-        
-        # Sort options
-        sort_col1, sort_col2 = st.columns(2)
-        with sort_col1:
-            # Include 'price_change_pct' and 'deliv_change_pct' for sorting
-            available_sort_cols = [col for col in ['price_change_pct', 'deliv_change_pct', 'close_price', 'volume', 'deliv_qty'] if col in categorized_df.columns]
-            if available_sort_cols:
-                sort_by = st.selectbox("Sort by", available_sort_cols)
-            else:
-                sort_by = 'symbol' # Fallback if no numeric columns
-        with sort_col2:
-            sort_order = st.selectbox("Sort order", ['Descending', 'Ascending'])
-        
-        # Sort dataframe
-        ascending = sort_order == 'Ascending'
-        # Handle potential NaNs in sort column by filling with 0 or a large number for sorting
-        display_df = categorized_df.sort_values(sort_by, ascending=ascending, na_position='last')
-        
-        # Display table with custom formatting
-        # Add 'Stock' column for combined symbol-series display
-        display_df['Stock'] = display_df['symbol'] + '-' + display_df['series']
-        display_columns = ['Stock', 'close_price', 'price_change_pct', 'deliv_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
-        available_display_cols = [col for col in display_columns if col in display_df.columns]
-        
-        if available_display_cols:
-            display_df_formatted = display_df[available_display_cols].copy()
-            
-            # Format columns if they exist
-            if 'close_price' in display_df_formatted.columns:
-                display_df_formatted['close_price'] = display_df_formatted['close_price'].apply(lambda x: f"₹{x:.2f}" if pd.notna(x) else "N/A")
-            if 'price_change_pct' in display_df_formatted.columns:
-                display_df_formatted['price_change_pct'] = display_df_formatted['price_change_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-            if 'deliv_change_pct' in display_df_formatted.columns:
-                display_df_formatted['deliv_change_pct'] = display_df_formatted['deliv_change_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-            if 'volume' in display_df_formatted.columns:
-                display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A") # Format as integer
-            if 'deliv_qty' in display_df_formatted.columns:
-                display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A") # Format as integer
-            
-            # Apply CSS styling to the 'signal_strength' column
-            def color_signal(val):
-                if val == 'STRONG BUY': return f'<span class="signal-price-increasing-delivery-volume-increasing">{val}</span>'
-                elif val == 'ACCUMULATION': return f'<span class="signal-price-not-increasing-delivery-volume-increasing">{val}</span>'
-                elif val == 'BOTTOM FISHING': return f'<span class="signal-price-decreasing-volume-increasing">{val}</span>'
-                elif val == 'WEAK SELL': return f'<span class="signal-price-decreasing-volume-decreasing">{val}</span>'
-                elif val == 'WEAK BUY': return f'<span class="signal-price-increasing-volume-not-increasing">{val}</span>'
-                elif val == 'NEUTRAL / HOLD': return f'<span class="signal-neutral-hold">{val}</span>'
-                return val
-
-            if 'signal_strength' in display_df_formatted.columns:
-                # Convert to HTML and apply custom styling
-                html_table = display_df_formatted.to_html(escape=False, index=False)
-                for original_signal in categorized_df['signal_strength'].unique():
-                    if original_signal:
-                        styled_signal_html = color_signal(original_signal)
-                        html_table = html_table.replace(f'<td>{original_signal}</td>', f'<td>{styled_signal_html}</td>')
-                st.markdown(html_table, unsafe_allow_html=True)
-            else:
-                st.dataframe(display_df_formatted, use_container_width=True, hide_index=True)
-        else:
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-        
-        # Export functionality
-        st.subheader("Export Data")
-        if st.button("Generate CSV Download"):
-            # Ensure the exported CSV uses the correct 'Stock' column if desired, or original symbol/series
-            export_df = categorized_df.copy()
-            export_df['Stock'] = export_df['symbol'] + '-' + export_df['series']
-            csv = export_df[['Stock', 'close_price', 'price_change_pct', 'deliv_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']].to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name=f"nse_analysis_{timeframe.lower().replace(' ', '_')}_{selected_date.strftime('%Y%m%d')}.csv",
-                mime="text/csv"
+    with col2:
+        strong_buy_count = len(categorized_df[categorized_df['signal_strength'] == 'STRONG BUY'])
+        st.metric("Strong Buy", strong_buy_count)
+    
+    with col3:
+        accumulation_count = len(categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION'])
+        st.metric("Accumulation", accumulation_count)
+    
+    with col4:
+        avg_price_change = categorized_df['price_change_pct'].mean()
+        st.metric("Avg Price Change %", f"{avg_price_change:.2f}%")
+    
+    # Charts section
+    st.subheader("Visual Analysis")
+    
+    # Create two columns for charts
+    chart_col1, chart_col2 = st.columns(2)
+    
+    with chart_col1:
+        # Category distribution pie chart
+        pie_chart = create_category_pie_chart(categorized_df)
+        if pie_chart:
+            st.plotly_chart(pie_chart, use_container_width=True)
+    
+    with chart_col2:
+        # Price change distribution histogram
+        if PLOTLY_AVAILABLE:
+            fig_hist = px.histogram(
+                categorized_df,
+                x='price_change_pct',
+                nbins=20,
+                title="Price Change Distribution",
+                labels={'price_change_pct': 'Price Change %', 'count': 'Number of Stocks'}
             )
+            fig_hist.update_layout(showlegend=False)
+            st.plotly_chart(fig_hist, use_container_width=True)
+        else:
+            st.subheader("Price Change Distribution")
+            st.bar_chart(categorized_df['price_change_pct'])
     
+    # Detailed results table
+    st.subheader("Detailed Stock Analysis")
+    
+    # Filter options
+    filter_col1, filter_col2 = st.columns(2)
+    
+    with filter_col1:
+        # Category filter
+        categories = ['All'] + list(categorized_df['category'].unique())
+        selected_category = st.selectbox("Filter by Category", categories)
+    
+    with filter_col2:
+        # Signal strength filter
+        signals = ['All'] + list(categorized_df['signal_strength'].unique())
+        selected_signal = st.selectbox("Filter by Signal", signals)
+    
+    # Apply filters
+    filtered_df = categorized_df.copy()
+    if selected_category != 'All':
+        filtered_df = filtered_df[filtered_df['category'] == selected_category]
+    if selected_signal != 'All':
+        filtered_df = filtered_df[filtered_df['signal_strength'] == selected_signal]
+    
+    # Sort by price change percentage (descending)
+    filtered_df = filtered_df.sort_values('price_change_pct', ascending=False)
+    
+    # Display results
+    st.write(f"Showing {len(filtered_df)} stocks out of {len(categorized_df)} total stocks")
+    
+    if not filtered_df.empty:
+        # Prepare display dataframe
+        display_df = filtered_df[[
+            'symbol', 'series', 'close_price', 'volume', 'deliv_qty', 
+            'price_change_pct', 'deliv_change_pct', 'signal_strength'
+        ]].copy()
+        
+        # Round numeric columns
+        display_df['close_price'] = display_df['close_price'].round(2)
+        display_df['volume'] = display_df['volume'].astype(int)
+        display_df['deliv_qty'] = display_df['deliv_qty'].astype(int)
+        display_df['price_change_pct'] = display_df['price_change_pct'].round(2)
+        display_df['deliv_change_pct'] = display_df['deliv_change_pct'].round(2)
+        
+        # Rename columns for better display
+        display_df.columns = [
+            'Symbol', 'Series', 'Close Price', 'Volume', 'Delivery Qty',
+            'Price Change %', 'Delivery Change %', 'Signal'
+        ]
+        
+        # Display the table
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Download button for filtered results
+        csv = display_df.to_csv(index=False)
+        st.download_button(
+            label="Download Filtered Results as CSV",
+            data=csv,
+            file_name=f"nse_analysis_{timeframe.lower().replace(' ', '_')}_{selected_date.strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
     else:
-        st.warning("No data available after applying filters")
+        st.info("No stocks match the selected filters.")
+    
+    # Summary insights
+    st.subheader("Key Insights")
+    
+    if not categorized_df.empty:
+        insights = []
+        
+        # Top performers
+        top_gainers = categorized_df.nlargest(3, 'price_change_pct')
+        if not top_gainers.empty:
+            insights.append(f"🚀 **Top Gainers:** {', '.join(top_gainers['symbol'].tolist())}")
+        
+        # Strong buy signals
+        strong_buys = categorized_df[categorized_df['signal_strength'] == 'STRONG BUY']
+        if not strong_buys.empty:
+            insights.append(f"💚 **Strong Buy Signals:** {len(strong_buys)} stocks showing price increase with delivery volume increase")
+        
+        # Accumulation signals
+        accumulation = categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION']
+        if not accumulation.empty:
+            insights.append(f"🔵 **Accumulation Signals:** {len(accumulation)} stocks showing delivery volume increase despite price not increasing")
+        
+        # Bottom fishing opportunities
+        bottom_fishing = categorized_df[categorized_df['signal_strength'] == 'BOTTOM FISHING']
+        if not bottom_fishing.empty:
+            insights.append(f"🟣 **Bottom Fishing:** {len(bottom_fishing)} stocks showing volume increase despite price decrease")
+        
+        # Display insights
+        for insight in insights:
+            st.write(insight)
+    
+    # Trading strategy recommendations
+    st.subheader("Trading Strategy Recommendations")
+    
+    strategy_recommendations = {
+        'STRONG BUY': "Consider buying - both price and delivery volume are increasing, indicating strong momentum.",
+        'ACCUMULATION': "Consider accumulating - increased delivery volume despite stable/declining price suggests institutional interest.",
+        'BOTTOM FISHING': "Potential contrarian opportunity - increased volume during price decline might indicate bottoming out.",
+        'WEAK BUY': "Cautious optimism - price is increasing but delivery volume is not supporting the move.",
+        'WEAK SELL': "Consider selling - both price and delivery volume are decreasing, indicating weak momentum.",
+        'NEUTRAL / HOLD': "Hold current positions - no clear directional signals."
+    }
+    
+    for signal, recommendation in strategy_recommendations.items():
+        count = len(categorized_df[categorized_df['signal_strength'] == signal])
+        if count > 0:
+            st.write(f"**{signal}** ({count} stocks): {recommendation}")
+    
+    # Disclaimer
+    st.markdown("---")
+    st.caption("⚠️ **Disclaimer:** This analysis is for educational purposes only. Always do your own research and consider consulting with a financial advisor before making investment decisions.")
 
 if __name__ == "__main__":
     main()
