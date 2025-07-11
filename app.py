@@ -118,23 +118,89 @@ def load_data_from_google_sheets(sheet_url):
         # Read the CSV data with proper error handling
         df = pd.read_csv(csv_url, encoding='utf-8')
         
+        # Store original column names for debugging
+        original_columns = df.columns.tolist()
+        st.sidebar.write("**Original Columns Found:**")
+        st.sidebar.write(original_columns)
+        
         # Clean column names
         df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
         
-        # Convert date column to datetime
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        # Store cleaned column names for debugging
+        cleaned_columns = df.columns.tolist()
+        st.sidebar.write("**Cleaned Columns:**")
+        st.sidebar.write(cleaned_columns)
+        
+        # Try to find date column with various possible names
+        date_candidates = ['date', 'datetime', 'timestamp', 'day', 'trading_date', 'trade_date']
+        date_column = None
+        
+        for candidate in date_candidates:
+            if candidate in df.columns:
+                date_column = candidate
+                break
+        
+        if date_column:
+            st.sidebar.success(f"✅ Found date column: '{date_column}'")
+            df['date'] = pd.to_datetime(df[date_column], errors='coerce')
+            # Remove rows with invalid dates
+            df = df.dropna(subset=['date'])
+        else:
+            st.sidebar.error("❌ No date column found!")
+            st.sidebar.write("Please ensure your sheet has a column with dates named one of:")
+            st.sidebar.write(date_candidates)
+            return None
         
         # Convert numeric columns
-        numeric_cols = ['prev_close', 'close_price', 'volume', 'deliv_qty', 'deliv_per']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        numeric_candidates = {
+            'prev_close': ['prev_close', 'previous_close', 'prev_close_price'],
+            'close_price': ['close_price', 'close', 'closing_price', 'ltp'],
+            'volume': ['volume', 'traded_quantity', 'qty'],
+            'deliv_qty': ['deliv_qty', 'delivery_quantity', 'delivery_qty'],
+            'deliv_per': ['deliv_per', 'delivery_percentage', 'delivery_per']
+        }
         
+        for standard_name, candidates in numeric_candidates.items():
+            found_column = None
+            for candidate in candidates:
+                if candidate in df.columns:
+                    found_column = candidate
+                    break
+            
+            if found_column:
+                df[standard_name] = pd.to_numeric(df[found_column], errors='coerce')
+                if found_column != standard_name:
+                    # Rename the column to standard name
+                    df = df.rename(columns={found_column: standard_name})
+        
+        # Try to find symbol column
+        symbol_candidates = ['symbol', 'stock_symbol', 'ticker', 'scrip', 'instrument']
+        symbol_column = None
+        
+        for candidate in symbol_candidates:
+            if candidate in df.columns:
+                symbol_column = candidate
+                break
+        
+        if symbol_column and symbol_column != 'symbol':
+            df = df.rename(columns={symbol_column: 'symbol'})
+        
+        # Final validation
+        required_columns = ['symbol', 'date', 'close_price']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            st.error(f"❌ Missing required columns: {missing_columns}")
+            st.write("**Available columns:**", df.columns.tolist())
+            return None
+        
+        st.sidebar.success(f"✅ Data loaded successfully: {len(df)} rows")
         return df
     
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
+        st.write("**Debug Info:**")
+        st.write(f"CSV URL: {csv_url if 'csv_url' in locals() else 'Not generated'}")
         return None
 
 def calculate_price_changes(df, timeframe, selected_date):
@@ -145,7 +211,8 @@ def calculate_price_changes(df, timeframe, selected_date):
         # Filter for selected date and previous date
         current_data = df[df['date'] == selected_date]
         prev_date = selected_date - timedelta(days=1)
-        prev_data = df[df['date'] == prev_date]
+        # Find the most recent data before the selected date
+        prev_data = df[df['date'] < selected_date].sort_values('date').groupby('symbol').last().reset_index()
         
         if not current_data.empty and not prev_data.empty:
             merged = current_data.merge(prev_data, on='symbol', suffixes=('', '_prev'))
@@ -157,7 +224,7 @@ def calculate_price_changes(df, timeframe, selected_date):
         # Compare with 7 days ago
         current_data = df[df['date'] == selected_date]
         week_ago_date = selected_date - timedelta(days=7)
-        week_ago_data = df[df['date'] <= week_ago_date].groupby('symbol').last().reset_index()
+        week_ago_data = df[df['date'] <= week_ago_date].sort_values('date').groupby('symbol').last().reset_index()
         
         if not current_data.empty and not week_ago_data.empty:
             merged = current_data.merge(week_ago_data, on='symbol', suffixes=('', '_week_ago'))
@@ -169,7 +236,7 @@ def calculate_price_changes(df, timeframe, selected_date):
         # Compare with 30 days ago
         current_data = df[df['date'] == selected_date]
         month_ago_date = selected_date - timedelta(days=30)
-        month_ago_data = df[df['date'] <= month_ago_date].groupby('symbol').last().reset_index()
+        month_ago_data = df[df['date'] <= month_ago_date].sort_values('date').groupby('symbol').last().reset_index()
         
         if not current_data.empty and not month_ago_data.empty:
             merged = current_data.merge(month_ago_data, on='symbol', suffixes=('', '_month_ago'))
@@ -333,14 +400,20 @@ def main():
     # Check if URL is provided
     if not sheet_url:
         st.warning("Please provide a Google Sheets URL to load data")
-        st.info("📝 **Instructions:**\n1. Make sure your Google Sheet is publicly accessible\n2. Copy the full URL from your browser\n3. Paste it in the sidebar")
+        st.info("📝 **Instructions:**\n1. Make sure your Google Sheet is publicly accessible\n2. Copy the full URL from your browser\n3. Paste it in the sidebar\n4. Your sheet should have columns like: Date, Symbol, Close Price, Volume, etc.")
+        st.write("**Expected Column Names (any of these variants will work):**")
+        st.write("- **Date**: Date, DateTime, Timestamp, Day, Trading_Date")
+        st.write("- **Symbol**: Symbol, Stock_Symbol, Ticker, Scrip, Instrument")
+        st.write("- **Price**: Close_Price, Close, Closing_Price, LTP")
+        st.write("- **Volume**: Volume, Traded_Quantity, Qty")
+        st.write("- **Delivery**: Deliv_Qty, Delivery_Quantity, Delivery_Qty")
         return
     
     # Load data
     df = load_data_from_google_sheets(sheet_url)
     if df is None:
         st.error("Failed to load data from Google Sheets")
-        st.info("**Troubleshooting:**\n1. Check if the sheet is publicly accessible\n2. Verify the URL is correct\n3. Ensure the sheet contains the required columns")
+        st.info("**Troubleshooting:**\n1. Check if the sheet is publicly accessible\n2. Verify the URL is correct\n3. Ensure the sheet contains the required columns\n4. Check the column names match expected formats")
         return
     
     # Validate data
@@ -351,11 +424,16 @@ def main():
     # Display data info
     st.sidebar.success(f"✅ Data loaded: {len(df)} rows")
     
+    # Show data preview
+    with st.sidebar.expander("Data Preview"):
+        st.write("**First 5 rows:**")
+        st.dataframe(df.head())
+    
     # Date and timeframe selection
     st.sidebar.subheader("Analysis Parameters")
     
     # Get available dates and remove NaT values
-    available_dates = df['date'].dropna().unique()
+    available_dates = df['date'].dropna().dt.date.unique()
     available_dates = sorted([d for d in available_dates if pd.notna(d)])
     
     if len(available_dates) == 0:
@@ -407,6 +485,7 @@ def main():
     
     if processed_df is None or processed_df.empty:
         st.error("No data available for the selected parameters")
+        st.info("Try selecting a different date or timeframe")
         return
     
     # Categorize stocks
@@ -418,7 +497,7 @@ def main():
     # Search filter
     search_term = st.sidebar.text_input("Search Stocks", "")
     if search_term:
-        categorized_df = categorized_df[categorized_df['symbol'].str.contains(search_term, case=False)]
+        categorized_df = categorized_df[categorized_df['symbol'].str.contains(search_term, case=False, na=False)]
     
     # Category filter
     categories = ['All'] + list(categorized_df['category'].unique())
@@ -485,12 +564,12 @@ def main():
         with col1:
             st.write("**Top Gainers**")
             top_gainers = categorized_df.nlargest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
-            st.dataframe(top_gainers)
+            st.dataframe(top_gainers, use_container_width=True)
         
         with col2:
             st.write("**Top Losers**")
             top_losers = categorized_df.nsmallest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
-            st.dataframe(top_losers)
+            st.dataframe(top_losers, use_container_width=True)
         
         # Detailed table
         st.subheader(f"Detailed Analysis ({len(categorized_df)} stocks)")
