@@ -46,48 +46,49 @@ st.markdown("""
     border-left: 4px solid #3b82f6;
     margin-bottom: 1rem;
 }
-.signal-strong-buy {
-    background-color: #10b981;
+/* Signal classes for styling table cells */
+.signal-price-increasing-delivery-volume-increasing {
+    background-color: #10b981; /* Strong Buy Green */
     color: white;
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
     font-size: 0.75rem;
     font-weight: 600;
 }
-.signal-weak-buy {
-    background-color: #f59e0b;
+.signal-price-not-increasing-delivery-volume-increasing {
+    background-color: #3b82f6; /* Accumulation Blue */
     color: white;
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
     font-size: 0.75rem;
     font-weight: 600;
 }
-.signal-accumulation {
-    background-color: #3b82f6;
+.signal-price-decreasing-volume-increasing {
+    background-color: #8b5cf6; /* Bottom Fishing Purple */
     color: white;
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
     font-size: 0.75rem;
     font-weight: 600;
 }
-.signal-bottom-fishing {
-    background-color: #8b5cf6;
+.signal-price-decreasing-volume-decreasing {
+    background-color: #ef4444; /* Weak Sell Red */
     color: white;
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
     font-size: 0.75rem;
     font-weight: 600;
 }
-.signal-weak-sell {
-    background-color: #ef4444;
+.signal-price-increasing-volume-not-increasing {
+    background-color: #f59e0b; /* Weak Buy Orange */
     color: white;
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
     font-size: 0.75rem;
     font-weight: 600;
 }
-.signal-hold {
-    background-color: #6b7280;
+.signal-neutral-hold {
+    background-color: #6b7280; /* Hold Grey */
     color: white;
     padding: 0.25rem 0.5rem;
     border-radius: 0.25rem;
@@ -100,7 +101,10 @@ st.markdown("""
 # Helper functions
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data_from_google_sheets(sheet_url):
-    """Load data from Google Sheets using the public CSV export URL"""
+    """
+    Load raw stock data from Google Sheets using the public CSV export URL.
+    This function now handles raw column names and calculates daily deltas.
+    """
     try:
         # Extract sheet ID and GID from the URL
         if '/d/' in sheet_url:
@@ -113,7 +117,9 @@ def load_data_from_google_sheets(sheet_url):
             else:
                 csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
         else:
-            csv_url = sheet_url
+            csv_url = sheet_url # Assume it's already a direct CSV export link
+            
+        st.sidebar.info(f"Attempting to load raw data from: {csv_url}")
         
         # Read the CSV data with proper error handling
         df = pd.read_csv(csv_url, encoding='utf-8')
@@ -123,7 +129,7 @@ def load_data_from_google_sheets(sheet_url):
         st.sidebar.write("**Original Columns Found:**")
         st.sidebar.write(original_columns)
         
-        # Clean column names
+        # Clean column names (lowercase, trim, replace spaces with underscores)
         df.columns = [col.strip().lower().replace(' ', '_') for col in df.columns]
         
         # Store cleaned column names for debugging
@@ -131,8 +137,8 @@ def load_data_from_google_sheets(sheet_url):
         st.sidebar.write("**Cleaned Columns:**")
         st.sidebar.write(cleaned_columns)
         
-        # Try to find date column with various possible names
-        date_candidates = ['date', 'datetime', 'timestamp', 'day', 'trading_date', 'trade_date']
+        # Try to find date column with various possible names (including 'date1' from sample)
+        date_candidates = ['date', 'datetime', 'timestamp', 'day', 'trading_date', 'trade_date', 'date1']
         date_column = None
         
         for candidate in date_candidates:
@@ -151,13 +157,12 @@ def load_data_from_google_sheets(sheet_url):
             st.sidebar.write(date_candidates)
             return None
         
-        # Convert numeric columns
+        # Convert numeric columns - mapping from raw names to standardized names
         numeric_candidates = {
             'prev_close': ['prev_close', 'previous_close', 'prev_close_price'],
-            'close_price': ['close_price', 'close', 'closing_price', 'ltp'],
-            'volume': ['volume', 'traded_quantity', 'qty'],
-            'deliv_qty': ['deliv_qty', 'delivery_quantity', 'delivery_qty'],
-            'deliv_per': ['deliv_per', 'delivery_percentage', 'delivery_per']
+            'close_price': ['close_price', 'close', 'closing_price', 'last_price', 'ltp'], # Added 'last_price'
+            'volume': ['volume', 'ttl_trd_qnty', 'traded_quantity', 'qty'], # Added 'ttl_trd_qnty'
+            'deliv_qty': ['deliv_qty', 'delivery_quantity', 'delivery_qty', 'del_qty']
         }
         
         for standard_name, candidates in numeric_candidates.items():
@@ -170,9 +175,12 @@ def load_data_from_google_sheets(sheet_url):
             if found_column:
                 df[standard_name] = pd.to_numeric(df[found_column], errors='coerce')
                 if found_column != standard_name:
-                    # Rename the column to standard name
                     df = df.rename(columns={found_column: standard_name})
-        
+            else:
+                # If a key numeric column is not found, set it to NaN column to avoid errors
+                df[standard_name] = np.nan 
+                st.sidebar.warning(f"⚠️ Column '{standard_name}' (or its candidates) not found. Setting to NaN.")
+
         # Try to find symbol column
         symbol_candidates = ['symbol', 'stock_symbol', 'ticker', 'scrip', 'instrument']
         symbol_column = None
@@ -184,128 +192,186 @@ def load_data_from_google_sheets(sheet_url):
         
         if symbol_column and symbol_column != 'symbol':
             df = df.rename(columns={symbol_column: 'symbol'})
-        
-        # Final validation
-        required_columns = ['symbol', 'date', 'close_price']
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        elif 'symbol' not in df.columns:
+            st.sidebar.error("❌ No symbol column found!")
+            st.sidebar.write("Please ensure your sheet has a column with symbols named one of:")
+            st.sidebar.write(symbol_candidates)
+            return None
+
+        # Final validation for essential columns
+        required_columns = ['symbol', 'date', 'close_price', 'volume', 'deliv_qty'] # prev_close is optional for daily calculation if close_price is available
+        missing_columns = [col for col in required_columns if col not in df.columns or df[col].isnull().all()]
         
         if missing_columns:
-            st.error(f"❌ Missing required columns: {missing_columns}")
+            st.error(f"❌ Missing or entirely empty required columns: {missing_columns}. Please check your raw data.")
             st.write("**Available columns:**", df.columns.tolist())
             return None
         
-        st.sidebar.success(f"✅ Data loaded successfully: {len(df)} rows")
+        # Ensure unique symbol-date pairs and sort data for accurate diff calculations
+        if 'symbol' in df.columns and 'date' in df.columns:
+            df = df.sort_values(by=['symbol', 'date']).drop_duplicates(subset=['symbol', 'date'], keep='last')
+            st.sidebar.success(f"✅ Data processed to ensure unique (Symbol, Date) pairs and sorted.")
+        
+        # --- Calculate Daily Deltas (Price, Volume, Delivery Quantity) ---
+        # These are calculated for every row relative to the previous trading day for that symbol
+        
+        # Price Change
+        df['daily_price_change_abs'] = df.groupby('symbol')['close_price'].diff()
+        df['daily_price_change_pct'] = (df['daily_price_change_abs'] / df.groupby('symbol')['close_price'].shift(1)) * 100
+        
+        # Volume Change
+        df['daily_volume_change_abs'] = df.groupby('symbol')['volume'].diff()
+        df['daily_volume_change_pct'] = (df['daily_volume_change_abs'] / df.groupby('symbol')['volume'].shift(1)) * 100
+
+        # Delivery Quantity Change
+        df['daily_deliv_change_abs'] = df.groupby('symbol')['deliv_qty'].diff()
+        df['daily_deliv_change_pct'] = (df['daily_deliv_change_abs'] / df.groupby('symbol')['deliv_qty'].shift(1)) * 100
+
+        # Fill NaN values for percentage changes where denominator was zero or first entry
+        df['daily_price_change_pct'] = df['daily_price_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
+        df['daily_volume_change_pct'] = df['daily_volume_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
+        df['daily_deliv_change_pct'] = df['daily_deliv_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        st.sidebar.success(f"✅ Daily deltas calculated. Total rows: {len(df)}")
         return df
     
     except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
+        st.error(f"Error loading or processing data: {str(e)}")
         st.write("**Debug Info:**")
         st.write(f"CSV URL: {csv_url if 'csv_url' in locals() else 'Not generated'}")
         return None
 
-def calculate_price_changes(df, timeframe, selected_date):
-    """Calculate price changes based on timeframe"""
+def calculate_price_changes(df, timeframe, selected_date, start_date=None, end_date=None):
+    """
+    Calculates price and volume/delivery changes based on the selected timeframe.
+    This function now uses the pre-calculated daily deltas for 'Today vs Yesterday'
+    and calculates other timeframes dynamically.
+    """
     df = df.copy()
     
+    # Ensure 'date' column is datetime type for comparisons
+    df['date'] = pd.to_datetime(df['date'])
+
     if timeframe == 'Today vs Yesterday':
-        # Filter for selected date and previous date
-        current_data = df[df['date'] == selected_date]
-        prev_date = selected_date - timedelta(days=1)
-        # Find the most recent data before the selected date
-        prev_data = df[df['date'] < selected_date].sort_values('date').groupby('symbol').last().reset_index()
+        # For 'Today vs Yesterday', use the pre-calculated daily deltas
+        # Filter for the selected date
+        current_day_data = df[df['date'] == selected_date].drop_duplicates(subset=['symbol'])
         
-        if not current_data.empty and not prev_data.empty:
-            merged = current_data.merge(prev_data, on='symbol', suffixes=('', '_prev'))
-            merged['price_change'] = merged['close_price'] - merged['close_price_prev']
-            merged['price_change_pct'] = (merged['price_change'] / merged['close_price_prev']) * 100
-            return merged
+        # Rename the daily delta columns to the generic names expected by categorize_stocks
+        if not current_day_data.empty:
+            current_day_data = current_day_data.rename(columns={
+                'daily_price_change_abs': 'price_change',
+                'daily_price_change_pct': 'price_change_pct',
+                'daily_volume_change_abs': 'volume_change', # Using volume for deliv_change here as per previous logic
+                'daily_deliv_change_pct': 'deliv_change_pct' # Use actual daily delivery change
+            })
+            # Ensure 'deliv_change' is also present if needed, though not directly used by categorize_stocks
+            current_day_data['deliv_change'] = current_day_data['daily_deliv_change_abs']
+            return current_day_data[['symbol', 'date', 'close_price', 'volume', 'deliv_qty', 'price_change', 'price_change_pct', 'deliv_change', 'deliv_change_pct']]
+        else:
+            return pd.DataFrame() # Return empty if no data for selected date
     
-    elif timeframe == 'Weekly':
-        # Compare with 7 days ago
-        current_data = df[df['date'] == selected_date]
-        week_ago_date = selected_date - timedelta(days=7)
-        week_ago_data = df[df['date'] <= week_ago_date].sort_values('date').groupby('symbol').last().reset_index()
-        
-        if not current_data.empty and not week_ago_data.empty:
-            merged = current_data.merge(week_ago_data, on='symbol', suffixes=('', '_week_ago'))
-            merged['price_change'] = merged['close_price'] - merged['close_price_week_ago']
-            merged['price_change_pct'] = (merged['price_change'] / merged['close_price_week_ago']) * 100
-            return merged
+    else: # For Weekly, Monthly, Custom Range, calculate dynamically
+        if timeframe == 'Weekly':
+            compare_date = selected_date - timedelta(days=7)
+        elif timeframe == 'Monthly':
+            compare_date = selected_date - timedelta(days=30)
+        elif timeframe == 'Custom Range':
+            compare_date = start_date # Use start_date for comparison base
+
+        # Get data for the selected end date
+        current_period_data = df[df['date'] == selected_date].drop_duplicates(subset=['symbol'])
+        if timeframe == 'Custom Range':
+            current_period_data = df[df['date'] == end_date].drop_duplicates(subset=['symbol'])
+
+        # Find the most recent data on or before the comparison date for each symbol
+        past_period_data_candidates = df[df['date'] <= compare_date].sort_values('date').groupby('symbol').last().reset_index()
+        past_period_data = past_period_data_candidates.drop_duplicates(subset=['symbol'])
+
+        if not current_period_data.empty and not past_period_data.empty:
+            merged = current_period_data.merge(past_period_data, on='symbol', suffixes=('', '_prev_period'))
+            merged = merged.drop_duplicates(subset=['symbol']) # Final check for merge-induced duplicates
+
+            # Calculate Price Change for the period
+            merged['price_change'] = merged['close_price'] - merged['close_price_prev_period']
+            merged['price_change_pct'] = (merged['price_change'] / merged['close_price_prev_period']) * 100
+            merged['price_change_pct'] = merged['price_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0) # Handle division by zero
+
+            # Calculate Volume Change for the period
+            if 'volume' in merged.columns and 'volume_prev_period' in merged.columns:
+                merged['volume_change'] = merged['volume'] - merged['volume_prev_period']
+                merged['volume_change_pct'] = (merged['volume_change'] / merged['volume_prev_period']) * 100
+                merged['volume_change_pct'] = merged['volume_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
+            else:
+                merged['volume_change'] = np.nan
+                merged['volume_change_pct'] = np.nan
+            
+            # Calculate Delivery Quantity Change for the period
+            if 'deliv_qty' in merged.columns and 'deliv_qty_prev_period' in merged.columns:
+                merged['deliv_change'] = merged['deliv_qty'] - merged['deliv_qty_prev_period']
+                merged['deliv_change_pct'] = (merged['deliv_change'] / merged['deliv_qty_prev_period']) * 100
+                merged['deliv_change_pct'] = merged['deliv_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
+            else:
+                merged['deliv_change'] = np.nan
+                merged['deliv_change_pct'] = np.nan
+
+            return merged[['symbol', 'date', 'close_price', 'volume', 'deliv_qty', 'price_change', 'price_change_pct', 'deliv_change', 'deliv_change_pct']]
+        else:
+            return pd.DataFrame() # Return empty DataFrame if no data for the period
     
-    elif timeframe == 'Monthly':
-        # Compare with 30 days ago
-        current_data = df[df['date'] == selected_date]
-        month_ago_date = selected_date - timedelta(days=30)
-        month_ago_data = df[df['date'] <= month_ago_date].sort_values('date').groupby('symbol').last().reset_index()
-        
-        if not current_data.empty and not month_ago_data.empty:
-            merged = current_data.merge(month_ago_data, on='symbol', suffixes=('', '_month_ago'))
-            merged['price_change'] = merged['close_price'] - merged['close_price_month_ago']
-            merged['price_change_pct'] = (merged['price_change'] / merged['close_price_month_ago']) * 100
-            return merged
-    
-    elif timeframe == 'Custom Range':
-        # This will be handled separately with date range inputs
-        return df
-    
-    return df
+    return pd.DataFrame() # Fallback return
 
 def categorize_stocks(df):
-    """Categorize stocks based on price and delivery volume patterns"""
+    """
+    Categorize stocks based on price and volume change patterns
+    as per the refined definitions.
+    """
     df = df.copy()
     
-    # Check for required columns
-    required_cols = ['price_change_pct']
+    # Ensure required columns for categorization exist
+    required_cols = ['price_change_pct', 'deliv_change_pct']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        st.error(f"Missing required columns: {missing_cols}")
+        st.error(f"Missing required columns for categorization: {missing_cols}")
+        df['category'] = 'N/A'
+        df['signal_strength'] = 'N/A'
+        df['category_color'] = '#6B7280' # Default grey
         return df
     
-    # Define thresholds
-    PRICE_THRESHOLD = 0.5  # 0.5%
-    DELIV_THRESHOLD = 5    # 5%
-    
-    # Calculate delivery volume changes (if available)
-    deliv_prev_cols = [col for col in df.columns if 'deliv_qty' in col and any(suffix in col for suffix in ['prev', 'week_ago', 'month_ago', 'start'])]
-    if deliv_prev_cols and 'deliv_qty' in df.columns:
-        # Avoid division by zero
-        prev_col = deliv_prev_cols[0]
-        df['deliv_change_pct'] = df.apply(
-            lambda row: ((row['deliv_qty'] - row[prev_col]) / row[prev_col]) * 100 
-            if pd.notna(row[prev_col]) and row[prev_col] != 0 else 0, 
-            axis=1
-        )
-    else:
-        df['deliv_change_pct'] = 0
-    
-    # Categorize based on price and delivery movements
     def get_category(row):
-        # Handle NaN values
-        price_change = row.get('price_change_pct', 0)
-        deliv_change = row.get('deliv_change_pct', 0)
+        price_change = row.get('price_change_pct', np.nan)
+        deliv_change = row.get('deliv_change_pct', np.nan)
         
-        if pd.isna(price_change):
-            price_change = 0
-        if pd.isna(deliv_change):
-            deliv_change = 0
+        # Handle NaN values gracefully, categorize as Neutral if data is missing
+        if pd.isna(price_change) or pd.isna(deliv_change):
+            return 'Neutral / Hold', 'NEUTRAL / HOLD', '#6B7280' # Grey
+
+        # 1. Price increasing, Delivery volume increasing
+        if price_change > 0 and deliv_change > 0:
+            return 'Price Inc, Del Vol Inc', 'STRONG BUY', '#10B981' # Green
         
-        price_up = price_change > PRICE_THRESHOLD
-        price_down = price_change < -PRICE_THRESHOLD
-        deliv_up = deliv_change > DELIV_THRESHOLD
-        deliv_down = deliv_change < -DELIV_THRESHOLD
-        
-        if price_up and deliv_up:
-            return 'Price Up + Delivery Up', 'STRONG BUY', '#10B981'
-        elif not price_up and deliv_up:
-            return 'Price Flat/Down + Delivery Up', 'ACCUMULATION', '#3B82F6'
-        elif price_down and deliv_up:
-            return 'Price Down + Delivery Up', 'BOTTOM FISHING', '#8B5CF6'
-        elif price_down and deliv_down:
-            return 'Price Down + Delivery Down', 'WEAK SELL', '#EF4444'
-        elif price_up and not deliv_up:
-            return 'Price Up + Delivery Flat/Down', 'WEAK BUY', '#F59E0B'
+        # 2. Price not increasing, Delivery volume increasing
+        # (Price change is zero or negative, Delivery volume is increasing)
+        elif price_change <= 0 and deliv_change > 0:
+            return 'Price Not Inc, Del Vol Inc', 'ACCUMULATION', '#3B82F6' # Blue
+            
+        # 3. Price decreasing, Volume increasing
+        # (Price change is negative, Delivery volume is increasing)
+        elif price_change < 0 and deliv_change > 0:
+            return 'Price Dec, Vol Inc', 'BOTTOM FISHING', '#8B5CF6' # Purple
+            
+        # 4. Price decreasing, Volume decreasing
+        # (Price change is negative, Delivery volume is decreasing)
+        elif price_change < 0 and deliv_change < 0:
+            return 'Price Dec, Vol Dec', 'WEAK SELL', '#EF4444' # Red
+            
+        # 5. Price increasing, Volume not increasing
+        # (Price change is positive, Delivery volume is zero or negative)
+        elif price_change > 0 and deliv_change <= 0:
+            return 'Price Inc, Vol Not Inc', 'WEAK BUY', '#F59E0B' # Orange
+            
         else:
-            return 'Neutral', 'HOLD', '#6B7280'
+            return 'Neutral / Hold', 'NEUTRAL / HOLD', '#6B7280' # Grey
     
     categories = df.apply(get_category, axis=1)
     df['category'] = [cat[0] for cat in categories]
@@ -316,6 +382,11 @@ def categorize_stocks(df):
 
 def create_category_pie_chart(df):
     """Create pie chart for category distribution"""
+    # Ensure category column exists before counting
+    if 'category' not in df.columns:
+        st.warning("Category column not found for pie chart.")
+        return None
+
     category_counts = df['category'].value_counts()
     
     if PLOTLY_AVAILABLE:
@@ -324,56 +395,21 @@ def create_category_pie_chart(df):
             names=category_counts.index,
             title="Stock Category Distribution",
             color_discrete_map={
-                'Price Up + Delivery Up': '#10B981',
-                'Price Flat/Down + Delivery Up': '#3B82F6',
-                'Price Down + Delivery Up': '#8B5CF6',
-                'Price Down + Delivery Down': '#EF4444',
-                'Price Up + Delivery Flat/Down': '#F59E0B',
-                'Neutral': '#6B7280'
+                'Price Inc, Del Vol Inc': '#10B981',
+                'Price Not Inc, Del Vol Inc': '#3B82F6',
+                'Price Dec, Vol Inc': '#8B5CF6',
+                'Price Dec, Vol Dec': '#EF4444',
+                'Price Inc, Vol Not Inc': '#F59E0B',
+                'Neutral / Hold': '#6B7280'
             }
         )
+        fig.update_traces(textposition='inside', textinfo='percent+label')
+        fig.update_layout(showlegend=True) # Ensure legend is shown
         return fig
     else:
         # Fallback to Streamlit native chart
         st.subheader("Stock Category Distribution")
         st.bar_chart(category_counts)
-        return None
-
-def create_scatter_plot(df):
-    """Create scatter plot for price vs delivery changes"""
-    if PLOTLY_AVAILABLE:
-        fig = px.scatter(
-            df, 
-            x='price_change_pct', 
-            y='deliv_change_pct',
-            hover_data=['symbol', 'close_price'],
-            color='category',
-            title="Price Change vs Delivery Volume Change",
-            labels={
-                'price_change_pct': 'Price Change (%)',
-                'deliv_change_pct': 'Delivery Volume Change (%)'
-            },
-            color_discrete_map={
-                'Price Up + Delivery Up': '#10B981',
-                'Price Flat/Down + Delivery Up': '#3B82F6',
-                'Price Down + Delivery Up': '#8B5CF6',
-                'Price Down + Delivery Down': '#EF4444',
-                'Price Up + Delivery Flat/Down': '#F59E0B',
-                'Neutral': '#6B7280'
-            }
-        )
-        return fig
-    else:
-        # Fallback to Streamlit native chart
-        st.subheader("Price Change vs Delivery Volume Change")
-        if 'deliv_change_pct' in df.columns:
-            chart_data = df[['price_change_pct', 'deliv_change_pct']].copy()
-            st.scatter_chart(chart_data.rename(columns={
-                'price_change_pct': 'Price Change (%)',
-                'deliv_change_pct': 'Delivery Volume Change (%)'
-            }))
-        else:
-            st.info("Delivery volume change data not available for scatter plot")
         return None
 
 # Main app
@@ -392,41 +428,30 @@ def main():
     
     # Google Sheets URL input
     sheet_url = st.sidebar.text_input(
-        "Google Sheets URL",
-        placeholder="Paste your Google Sheets URL here",
-        help="Make sure your Google Sheet is publicly accessible"
+        "Google Sheets URL (Raw Data)",
+        placeholder="Paste your Google Sheets URL here (e.g., your 'NSE_2025' sheet)",
+        help="Make sure your Google Sheet is publicly accessible. This should be the URL of your raw data sheet."
     )
     
     # Check if URL is provided
     if not sheet_url:
         st.warning("Please provide a Google Sheets URL to load data")
-        st.info("📝 **Instructions:**\n1. Make sure your Google Sheet is publicly accessible\n2. Copy the full URL from your browser\n3. Paste it in the sidebar\n4. Your sheet should have columns like: Date, Symbol, Close Price, Volume, etc.")
-        st.write("**Expected Column Names (any of these variants will work):**")
-        st.write("- **Date**: Date, DateTime, Timestamp, Day, Trading_Date")
-        st.write("- **Symbol**: Symbol, Stock_Symbol, Ticker, Scrip, Instrument")
-        st.write("- **Price**: Close_Price, Close, Closing_Price, LTP")
-        st.write("- **Volume**: Volume, Traded_Quantity, Qty")
-        st.write("- **Delivery**: Deliv_Qty, Delivery_Quantity, Delivery_Qty")
+        st.info("📝 **Instructions:**\n1. Make your raw data Google Sheet (e.g., 'NSE_2025') publicly accessible.\n2. Copy the full URL from your browser.\n3. Paste it in the sidebar.\n\n**Expected Raw Column Names (any of these variants will work):**\n- **Date**: Date, Date1, DateTime, Timestamp, Day, Trading_Date\n- **Symbol**: Symbol, Stock_Symbol, Ticker, Scrip, Instrument\n- **Close Price**: Close_Price, Close, Closing_Price, LAST_PRICE, LTP\n- **Previous Close**: PREV_CLOSE, Previous_Close, Prev_Close_Price\n- **Volume**: Volume, TTL_TRD_QNTY, Traded_Quantity, Qty\n- **Delivery**: DELIV_QTY, Delivery_Quantity, Del_Qty")
         return
     
     # Load data
     df = load_data_from_google_sheets(sheet_url)
-    if df is None:
-        st.error("Failed to load data from Google Sheets")
-        st.info("**Troubleshooting:**\n1. Check if the sheet is publicly accessible\n2. Verify the URL is correct\n3. Ensure the sheet contains the required columns\n4. Check the column names match expected formats")
-        return
-    
-    # Validate data
-    if df.empty:
-        st.error("No data available in the sheet")
+    if df is None or df.empty:
+        st.error("Failed to load or process data from Google Sheets")
+        st.info("**Troubleshooting:**\n1. Check if the sheet is publicly accessible.\n2. Verify the URL is correct.\n3. Ensure the sheet contains the expected raw columns and valid data.\n4. Check the column names match expected formats (case-insensitive, spaces replaced by underscores).")
         return
     
     # Display data info
-    st.sidebar.success(f"✅ Data loaded: {len(df)} rows")
+    st.sidebar.success(f"✅ Raw data loaded and pre-processed: {len(df)} rows")
     
     # Show data preview
-    with st.sidebar.expander("Data Preview"):
-        st.write("**First 5 rows:**")
+    with st.sidebar.expander("Processed Data Preview (First 5 rows)"):
+        st.write("**Data after initial processing and daily delta calculation:**")
         st.dataframe(df.head())
     
     # Date and timeframe selection
@@ -437,7 +462,7 @@ def main():
     available_dates = sorted([d for d in available_dates if pd.notna(d)])
     
     if len(available_dates) == 0:
-        st.error("No valid dates found in the data")
+        st.error("No valid dates found in the data after processing.")
         return
     
     max_date = max(available_dates)
@@ -445,7 +470,7 @@ def main():
     
     # Date selection
     selected_date = st.sidebar.date_input(
-        "Select Date",
+        "Select Date for Analysis",
         value=max_date,
         min_value=min_date,
         max_value=max_date
@@ -459,36 +484,25 @@ def main():
     )
     
     # Custom date range for custom timeframe
+    start_date_custom = None
+    end_date_custom = None
     if timeframe == "Custom Range":
-        start_date = st.sidebar.date_input("Start Date", value=max_date - timedelta(days=30))
-        end_date = st.sidebar.date_input("End Date", value=max_date)
-        start_date = pd.to_datetime(start_date)
-        end_date = pd.to_datetime(end_date)
+        start_date_custom = st.sidebar.date_input("Start Date", value=max_date - timedelta(days=30), min_value=min_date, max_value=max_date)
+        end_date_custom = st.sidebar.date_input("End Date", value=max_date, min_value=min_date, max_value=max_date)
+        start_date_custom = pd.to_datetime(start_date_custom)
+        end_date_custom = pd.to_datetime(end_date_custom)
     
     # Process data based on timeframe
-    if timeframe == "Custom Range":
-        processed_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-        # For custom range, calculate change from start to end
-        start_data = processed_df[processed_df['date'] == start_date]
-        end_data = processed_df[processed_df['date'] == end_date]
-        
-        if not start_data.empty and not end_data.empty:
-            merged = end_data.merge(start_data, on='symbol', suffixes=('', '_start'))
-            merged['price_change'] = merged['close_price'] - merged['close_price_start']
-            merged['price_change_pct'] = (merged['price_change'] / merged['close_price_start']) * 100
-            processed_df = merged
-        else:
-            st.error("No data available for selected date range")
-            return
-    else:
-        processed_df = calculate_price_changes(df, timeframe, selected_date)
+    # This step now calculates the deltas for the *selected* timeframe,
+    # or uses the pre-calculated daily deltas for "Today vs Yesterday".
+    processed_df = calculate_price_changes(df, timeframe, selected_date, start_date=start_date_custom, end_date=end_date_custom)
     
     if processed_df is None or processed_df.empty:
-        st.error("No data available for the selected parameters")
-        st.info("Try selecting a different date or timeframe")
+        st.error("No data available for the selected parameters after calculating changes.")
+        st.info("Try selecting a different date or timeframe. Ensure data exists for both start and end points of the comparison.")
         return
     
-    # Categorize stocks
+    # Categorize stocks based on the calculated changes for the selected timeframe
     categorized_df = categorize_stocks(processed_df)
     
     # Filtering options
@@ -500,7 +514,7 @@ def main():
         categorized_df = categorized_df[categorized_df['symbol'].str.contains(search_term, case=False, na=False)]
     
     # Category filter
-    categories = ['All'] + list(categorized_df['category'].unique())
+    categories = ['All'] + sorted(list(categorized_df['category'].unique()))
     selected_category = st.sidebar.selectbox("Filter by Category", categories)
     if selected_category != 'All':
         categorized_df = categorized_df[categorized_df['category'] == selected_category]
@@ -508,37 +522,39 @@ def main():
     # Significant moves only
     significant_only = st.sidebar.checkbox("Show Significant Moves Only (>2% price change)")
     if significant_only:
-        categorized_df = categorized_df[abs(categorized_df['price_change_pct']) > 2]
-    
+        # Check if 'price_change_pct' exists before filtering
+        if 'price_change_pct' in categorized_df.columns:
+            categorized_df = categorized_df[abs(categorized_df['price_change_pct'].fillna(0)) > 2]
+        else:
+            st.warning("Cannot filter by significant moves: 'price_change_pct' column not found.")
+
     # Main dashboard
     if not categorized_df.empty:
-        # Check for required columns before creating metrics
-        required_metrics_cols = ['signal_strength', 'price_change_pct']
-        if all(col in categorized_df.columns for col in required_metrics_cols):
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                strong_buy_count = len(categorized_df[categorized_df['signal_strength'] == 'STRONG BUY'])
-                st.metric("Strong Buy Signals", strong_buy_count)
-            
-            with col2:
-                accumulation_count = len(categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION'])
-                st.metric("Accumulation Signals", accumulation_count)
-            
-            with col3:
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            strong_buy_count = len(categorized_df[categorized_df['signal_strength'] == 'STRONG BUY'])
+            st.metric("Price Inc, Del Vol Inc", strong_buy_count)
+        
+        with col2:
+            accumulation_count = len(categorized_df[categorized_df['signal_strength'] == 'ACCUMULATION'])
+            st.metric("Price Not Inc, Del Vol Inc", accumulation_count)
+        
+        with col3:
+            # Ensure price_change_pct exists before calculating mean
+            if 'price_change_pct' in categorized_df.columns:
                 avg_price_change = categorized_df['price_change_pct'].mean()
-                st.metric("Avg Price Change", f"{avg_price_change:.2f}%")
-            
-            with col4:
-                total_stocks = len(categorized_df)
-                st.metric("Total Stocks", total_stocks)
-        else:
-            st.error("Missing required columns for metrics analysis")
-            return
+                st.metric("Avg Price Change", f"{avg_price_change:.2f}%" if pd.notna(avg_price_change) else "N/A")
+            else:
+                st.metric("Avg Price Change", "N/A")
+        
+        with col4:
+            total_stocks = len(categorized_df)
+            st.metric("Total Stocks", total_stocks)
         
         # Charts
-        col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2) # Keep two columns for potential future charts if needed
         
         with col1:
             if PLOTLY_AVAILABLE:
@@ -549,13 +565,8 @@ def main():
                 create_category_pie_chart(categorized_df)
         
         with col2:
-            if PLOTLY_AVAILABLE:
-                fig_scatter = create_scatter_plot(categorized_df)
-                if fig_scatter:
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-            else:
-                create_scatter_plot(categorized_df)
-        
+            st.info("Additional charts can be added here if needed.") # Placeholder
+            
         # Top movers
         st.subheader("Top Movers")
         
@@ -563,13 +574,21 @@ def main():
         
         with col1:
             st.write("**Top Gainers**")
-            top_gainers = categorized_df.nlargest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
-            st.dataframe(top_gainers, use_container_width=True)
+            # Ensure price_change_pct exists before sorting
+            if 'price_change_pct' in categorized_df.columns:
+                top_gainers = categorized_df.nlargest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
+                st.dataframe(top_gainers, use_container_width=True, hide_index=True)
+            else:
+                st.info("Price change data not available for Top Gainers.")
         
         with col2:
             st.write("**Top Losers**")
-            top_losers = categorized_df.nsmallest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
-            st.dataframe(top_losers, use_container_width=True)
+            # Ensure price_change_pct exists before sorting
+            if 'price_change_pct' in categorized_df.columns:
+                top_losers = categorized_df.nsmallest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
+                st.dataframe(top_losers, use_container_width=True, hide_index=True)
+            else:
+                st.info("Price change data not available for Top Losers.")
         
         # Detailed table
         st.subheader(f"Detailed Analysis ({len(categorized_df)} stocks)")
@@ -577,20 +596,22 @@ def main():
         # Sort options
         sort_col1, sort_col2 = st.columns(2)
         with sort_col1:
-            available_sort_cols = [col for col in ['price_change_pct', 'close_price', 'volume', 'deliv_qty'] if col in categorized_df.columns]
+            # Include 'price_change_pct' and 'deliv_change_pct' for sorting
+            available_sort_cols = [col for col in ['price_change_pct', 'deliv_change_pct', 'close_price', 'volume', 'deliv_qty'] if col in categorized_df.columns]
             if available_sort_cols:
                 sort_by = st.selectbox("Sort by", available_sort_cols)
             else:
-                sort_by = 'price_change_pct'
+                sort_by = 'symbol' # Fallback if no numeric columns
         with sort_col2:
             sort_order = st.selectbox("Sort order", ['Descending', 'Ascending'])
         
         # Sort dataframe
         ascending = sort_order == 'Ascending'
-        display_df = categorized_df.sort_values(sort_by, ascending=ascending)
+        # Handle potential NaNs in sort column by filling with 0 or a large number for sorting
+        display_df = categorized_df.sort_values(sort_by, ascending=ascending, na_position='last')
         
         # Display table with custom formatting
-        display_columns = ['symbol', 'close_price', 'price_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
+        display_columns = ['symbol', 'close_price', 'price_change_pct', 'deliv_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
         available_display_cols = [col for col in display_columns if col in display_df.columns]
         
         if available_display_cols:
@@ -601,14 +622,36 @@ def main():
                 display_df_formatted['close_price'] = display_df_formatted['close_price'].apply(lambda x: f"₹{x:.2f}" if pd.notna(x) else "N/A")
             if 'price_change_pct' in display_df_formatted.columns:
                 display_df_formatted['price_change_pct'] = display_df_formatted['price_change_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+            if 'deliv_change_pct' in display_df_formatted.columns:
+                display_df_formatted['deliv_change_pct'] = display_df_formatted['deliv_change_pct'].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
             if 'volume' in display_df_formatted.columns:
-                display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
+                display_df_formatted['volume'] = display_df_formatted['volume'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A") # Format as integer
             if 'deliv_qty' in display_df_formatted.columns:
-                display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,}" if pd.notna(x) else "N/A")
+                display_df_formatted['deliv_qty'] = display_df_formatted['deliv_qty'].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "N/A") # Format as integer
             
-            st.dataframe(display_df_formatted, use_container_width=True)
+            # Apply CSS styling to the 'signal_strength' column
+            def color_signal(val):
+                if val == 'STRONG BUY': return f'<span class="signal-price-increasing-delivery-volume-increasing">{val}</span>'
+                elif val == 'ACCUMULATION': return f'<span class="signal-price-not-increasing-delivery-volume-increasing">{val}</span>'
+                elif val == 'BOTTOM FISHING': return f'<span class="signal-price-decreasing-volume-increasing">{val}</span>'
+                elif val == 'WEAK SELL': return f'<span class="signal-price-decreasing-volume-decreasing">{val}</span>'
+                elif val == 'WEAK BUY': return f'<span class="signal-price-increasing-volume-not-increasing">{val}</span>'
+                elif val == 'NEUTRAL / HOLD': return f'<span class="signal-neutral-hold">{val}</span>'
+                return val
+
+            if 'signal_strength' in display_df_formatted.columns:
+                display_df_html = display_df_formatted.to_html(escape=False, index=False)
+                # Replace plain text signal strength with styled HTML
+                for original_signal in categorized_df['signal_strength'].unique():
+                    if original_signal: # Avoid None/NaN
+                        styled_signal_html = color_signal(original_signal)
+                        # Replace only the specific cell content, not general text
+                        display_df_html = display_df_html.replace(f'<td>{original_signal}</td>', f'<td>{styled_signal_html}</td>')
+                st.markdown(display_df_html, unsafe_allow_html=True)
+            else:
+                st.dataframe(display_df_formatted, use_container_width=True, hide_index=True)
         else:
-            st.dataframe(display_df, use_container_width=True)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
         
         # Export functionality
         st.subheader("Export Data")
