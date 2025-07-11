@@ -137,99 +137,109 @@ def load_data_from_google_sheets(sheet_url):
         st.sidebar.write("**Cleaned Columns:**")
         st.sidebar.write(cleaned_columns)
         
-        # Try to find date column with various possible names (including 'date1' from sample)
+        # --- Column Mapping and Type Conversion ---
+        
+        # Date column
         date_candidates = ['date', 'datetime', 'timestamp', 'day', 'trading_date', 'trade_date', 'date1']
         date_column = None
-        
         for candidate in date_candidates:
             if candidate in df.columns:
                 date_column = candidate
                 break
-        
         if date_column:
-            st.sidebar.success(f"✅ Found date column: '{date_column}'")
             df['date'] = pd.to_datetime(df[date_column], errors='coerce')
-            # Remove rows with invalid dates
-            df = df.dropna(subset=['date'])
+            df = df.dropna(subset=['date']) # Remove rows with invalid dates
         else:
-            st.sidebar.error("❌ No date column found!")
-            st.sidebar.write("Please ensure your sheet has a column with dates named one of:")
-            st.sidebar.write(date_candidates)
+            st.sidebar.error("❌ No date column found! Please ensure your sheet has a column with dates named one of: " + ", ".join(date_candidates))
             return None
         
-        # Convert numeric columns - mapping from raw names to standardized names
-        numeric_candidates = {
+        # Symbol column
+        symbol_candidates = ['symbol', 'stock_symbol', 'ticker', 'scrip', 'instrument']
+        symbol_column = None
+        for candidate in symbol_candidates:
+            if candidate in df.columns:
+                symbol_column = candidate
+                break
+        if symbol_column and symbol_column != 'symbol':
+            df = df.rename(columns={symbol_column: 'symbol'})
+        elif 'symbol' not in df.columns:
+            st.sidebar.error("❌ No symbol column found! Please ensure your sheet has a column with symbols named one of: " + ", ".join(symbol_candidates))
+            return None
+        
+        # Series column (Crucial for uniqueness with Symbol)
+        series_candidates = ['series', 'stock_series']
+        series_column = None
+        for candidate in series_candidates:
+            if candidate in df.columns:
+                series_column = candidate
+                break
+        if series_column and series_column != 'series':
+            df = df.rename(columns={series_column: 'series'})
+        elif 'series' not in df.columns:
+            # If no series column, create a dummy one to avoid errors in drop_duplicates
+            df['series'] = 'EQ' # Default to EQ if not found
+            st.sidebar.warning("⚠️ 'SERIES' column not found. Assuming all stocks are 'EQ' series for uniqueness.")
+
+        # Numeric columns mapping and conversion
+        numeric_cols_map = {
             'prev_close': ['prev_close', 'previous_close', 'prev_close_price'],
-            'close_price': ['close_price', 'close', 'closing_price', 'last_price', 'ltp'], # Added 'last_price'
-            'volume': ['volume', 'ttl_trd_qnty', 'traded_quantity', 'qty'], # Added 'ttl_trd_qnty'
-            'deliv_qty': ['deliv_qty', 'delivery_quantity', 'delivery_qty', 'del_qty']
+            'close_price': ['close_price', 'close', 'closing_price', 'last_price', 'ltp'],
+            'volume': ['volume', 'ttl_trd_qnty', 'traded_quantity', 'qty'],
+            'deliv_qty': ['deliv_qty', 'delivery_quantity', 'delivery_qty', 'del_qty'],
+            'deliv_per': ['deliv_per', 'delivery_percentage', 'delivery_per'] # Directly map DELIV_PER
         }
         
-        for standard_name, candidates in numeric_candidates.items():
+        for standard_name, candidates in numeric_cols_map.items():
             found_column = None
             for candidate in candidates:
                 if candidate in df.columns:
                     found_column = candidate
                     break
-            
             if found_column:
                 df[standard_name] = pd.to_numeric(df[found_column], errors='coerce')
                 if found_column != standard_name:
                     df = df.rename(columns={found_column: standard_name})
             else:
-                # If a key numeric column is not found, set it to NaN column to avoid errors
-                df[standard_name] = np.nan 
+                df[standard_name] = np.nan # Ensure column exists even if empty
                 st.sidebar.warning(f"⚠️ Column '{standard_name}' (or its candidates) not found. Setting to NaN.")
 
-        # Try to find symbol column
-        symbol_candidates = ['symbol', 'stock_symbol', 'ticker', 'scrip', 'instrument']
-        symbol_column = None
-        
-        for candidate in symbol_candidates:
-            if candidate in df.columns:
-                symbol_column = candidate
-                break
-        
-        if symbol_column and symbol_column != 'symbol':
-            df = df.rename(columns={symbol_column: 'symbol'})
-        elif 'symbol' not in df.columns:
-            st.sidebar.error("❌ No symbol column found!")
-            st.sidebar.write("Please ensure your sheet has a column with symbols named one of:")
-            st.sidebar.write(symbol_candidates)
-            return None
-
         # Final validation for essential columns
-        required_columns = ['symbol', 'date', 'close_price', 'volume', 'deliv_qty'] # prev_close is optional for daily calculation if close_price is available
+        required_columns = ['symbol', 'date', 'close_price', 'volume', 'deliv_qty'] 
         missing_columns = [col for col in required_columns if col not in df.columns or df[col].isnull().all()]
         
         if missing_columns:
-            st.error(f"❌ Missing or entirely empty required columns: {missing_columns}. Please check your raw data.")
-            st.write("**Available columns:**", df.columns.tolist())
+            st.error(f"❌ Missing or entirely empty required columns after mapping: {missing_columns}. Please check your raw data.")
+            st.write("**Available columns after initial cleaning:**", df.columns.tolist())
             return None
         
-        # Ensure unique symbol-date pairs and sort data for accurate diff calculations
-        if 'symbol' in df.columns and 'date' in df.columns:
-            df = df.sort_values(by=['symbol', 'date']).drop_duplicates(subset=['symbol', 'date'], keep='last')
-            st.sidebar.success(f"✅ Data processed to ensure unique (Symbol, Date) pairs and sorted.")
-        
+        # Ensure unique (symbol, series, date) pairs and sort data for accurate diff calculations
+        if 'symbol' in df.columns and 'series' in df.columns and 'date' in df.columns:
+            df['unique_id'] = df['symbol'] + '-' + df['series'] # Create a combined ID for grouping
+            df = df.sort_values(by=['unique_id', 'date']).drop_duplicates(subset=['unique_id', 'date'], keep='last')
+            st.sidebar.success(f"✅ Data processed to ensure unique (Symbol, Series, Date) pairs and sorted.")
+        else:
+            st.sidebar.warning("Could not create unique ID for proper de-duplication and sorting.")
+
         # --- Calculate Daily Deltas (Price, Volume, Delivery Quantity) ---
-        # These are calculated for every row relative to the previous trading day for that symbol
+        # These are calculated for every row relative to the previous trading day for that unique stock-series combination
         
         # Price Change
-        df['daily_price_change_abs'] = df.groupby('symbol')['close_price'].diff()
-        df['daily_price_change_pct'] = (df['daily_price_change_abs'] / df.groupby('symbol')['close_price'].shift(1)) * 100
+        df['daily_price_change_abs'] = df.groupby('unique_id')['close_price'].diff()
+        # Handle division by zero/inf for percentage calculation
+        price_prev = df.groupby('unique_id')['close_price'].shift(1)
+        df['daily_price_change_pct'] = (df['daily_price_change_abs'] / price_prev) * 100
+        df['daily_price_change_pct'] = df['daily_price_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
         
         # Volume Change
-        df['daily_volume_change_abs'] = df.groupby('symbol')['volume'].diff()
-        df['daily_volume_change_pct'] = (df['daily_volume_change_abs'] / df.groupby('symbol')['volume'].shift(1)) * 100
+        df['daily_volume_change_abs'] = df.groupby('unique_id')['volume'].diff()
+        volume_prev = df.groupby('unique_id')['volume'].shift(1)
+        df['daily_volume_change_pct'] = (df['daily_volume_change_abs'] / volume_prev) * 100
+        df['daily_volume_change_pct'] = df['daily_volume_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
 
         # Delivery Quantity Change
-        df['daily_deliv_change_abs'] = df.groupby('symbol')['deliv_qty'].diff()
-        df['daily_deliv_change_pct'] = (df['daily_deliv_change_abs'] / df.groupby('symbol')['deliv_qty'].shift(1)) * 100
-
-        # Fill NaN values for percentage changes where denominator was zero or first entry
-        df['daily_price_change_pct'] = df['daily_price_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
-        df['daily_volume_change_pct'] = df['daily_volume_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
+        df['daily_deliv_change_abs'] = df.groupby('unique_id')['deliv_qty'].diff()
+        deliv_qty_prev = df.groupby('unique_id')['deliv_qty'].shift(1)
+        df['daily_deliv_change_pct'] = (df['daily_deliv_change_abs'] / deliv_qty_prev) * 100
         df['daily_deliv_change_pct'] = df['daily_deliv_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
 
         st.sidebar.success(f"✅ Daily deltas calculated. Total rows: {len(df)}")
@@ -255,52 +265,56 @@ def calculate_price_changes(df, timeframe, selected_date, start_date=None, end_d
     if timeframe == 'Today vs Yesterday':
         # For 'Today vs Yesterday', use the pre-calculated daily deltas
         # Filter for the selected date
-        current_day_data = df[df['date'] == selected_date].drop_duplicates(subset=['symbol'])
+        current_day_data = df[df['date'] == selected_date].drop_duplicates(subset=['unique_id'])
         
         # Rename the daily delta columns to the generic names expected by categorize_stocks
         if not current_day_data.empty:
             current_day_data = current_day_data.rename(columns={
                 'daily_price_change_abs': 'price_change',
                 'daily_price_change_pct': 'price_change_pct',
-                'daily_volume_change_abs': 'volume_change', # Using volume for deliv_change here as per previous logic
-                'daily_deliv_change_pct': 'deliv_change_pct' # Use actual daily delivery change
+                'daily_volume_change_abs': 'volume_change', 
+                'daily_deliv_change_abs': 'deliv_change',
+                'daily_deliv_change_pct': 'deliv_change_pct'
             })
-            # Ensure 'deliv_change' is also present if needed, though not directly used by categorize_stocks
-            current_day_data['deliv_change'] = current_day_data['daily_deliv_change_abs']
-            return current_day_data[['symbol', 'date', 'close_price', 'volume', 'deliv_qty', 'price_change', 'price_change_pct', 'deliv_change', 'deliv_change_pct']]
+            # Select relevant columns for return
+            return current_day_data[['symbol', 'series', 'date', 'close_price', 'volume', 'deliv_qty', 'price_change', 'price_change_pct', 'deliv_change', 'deliv_change_pct']]
         else:
             return pd.DataFrame() # Return empty if no data for selected date
     
     else: # For Weekly, Monthly, Custom Range, calculate dynamically
+        # Determine the comparison date based on timeframe
         if timeframe == 'Weekly':
             compare_date = selected_date - timedelta(days=7)
+            end_date_for_period = selected_date
         elif timeframe == 'Monthly':
             compare_date = selected_date - timedelta(days=30)
+            end_date_for_period = selected_date
         elif timeframe == 'Custom Range':
-            compare_date = start_date # Use start_date for comparison base
+            compare_date = start_date 
+            end_date_for_period = end_date
 
-        # Get data for the selected end date
-        current_period_data = df[df['date'] == selected_date].drop_duplicates(subset=['symbol'])
-        if timeframe == 'Custom Range':
-            current_period_data = df[df['date'] == end_date].drop_duplicates(subset=['symbol'])
+        # Get data for the selected end date of the period
+        current_period_data = df[df['date'] == end_date_for_period].drop_duplicates(subset=['unique_id'])
 
-        # Find the most recent data on or before the comparison date for each symbol
-        past_period_data_candidates = df[df['date'] <= compare_date].sort_values('date').groupby('symbol').last().reset_index()
-        past_period_data = past_period_data_candidates.drop_duplicates(subset=['symbol'])
+        # Find the most recent data on or before the comparison date for each unique_id
+        past_period_data_candidates = df[df['date'] <= compare_date].sort_values('date').groupby('unique_id').last().reset_index()
+        past_period_data = past_period_data_candidates.drop_duplicates(subset=['unique_id'])
 
         if not current_period_data.empty and not past_period_data.empty:
-            merged = current_period_data.merge(past_period_data, on='symbol', suffixes=('', '_prev_period'))
-            merged = merged.drop_duplicates(subset=['symbol']) # Final check for merge-induced duplicates
+            merged = current_period_data.merge(past_period_data, on='unique_id', suffixes=('', '_prev_period'))
+            merged = merged.drop_duplicates(subset=['unique_id']) # Final check for merge-induced duplicates
 
             # Calculate Price Change for the period
             merged['price_change'] = merged['close_price'] - merged['close_price_prev_period']
-            merged['price_change_pct'] = (merged['price_change'] / merged['close_price_prev_period']) * 100
-            merged['price_change_pct'] = merged['price_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0) # Handle division by zero
+            price_prev_period = merged['close_price_prev_period'].replace(0, np.nan) # Avoid division by zero
+            merged['price_change_pct'] = (merged['price_change'] / price_prev_period) * 100
+            merged['price_change_pct'] = merged['price_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0) 
 
             # Calculate Volume Change for the period
             if 'volume' in merged.columns and 'volume_prev_period' in merged.columns:
                 merged['volume_change'] = merged['volume'] - merged['volume_prev_period']
-                merged['volume_change_pct'] = (merged['volume_change'] / merged['volume_prev_period']) * 100
+                volume_prev_period = merged['volume_prev_period'].replace(0, np.nan) # Avoid division by zero
+                merged['volume_change_pct'] = (merged['volume_change'] / volume_prev_period) * 100
                 merged['volume_change_pct'] = merged['volume_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
             else:
                 merged['volume_change'] = np.nan
@@ -309,13 +323,14 @@ def calculate_price_changes(df, timeframe, selected_date, start_date=None, end_d
             # Calculate Delivery Quantity Change for the period
             if 'deliv_qty' in merged.columns and 'deliv_qty_prev_period' in merged.columns:
                 merged['deliv_change'] = merged['deliv_qty'] - merged['deliv_qty_prev_period']
-                merged['deliv_change_pct'] = (merged['deliv_change'] / merged['deliv_qty_prev_period']) * 100
+                deliv_qty_prev_period = merged['deliv_qty_prev_period'].replace(0, np.nan) # Avoid division by zero
+                merged['deliv_change_pct'] = (merged['deliv_change'] / deliv_qty_prev_period) * 100
                 merged['deliv_change_pct'] = merged['deliv_change_pct'].replace([np.inf, -np.inf], np.nan).fillna(0)
             else:
                 merged['deliv_change'] = np.nan
                 merged['deliv_change_pct'] = np.nan
 
-            return merged[['symbol', 'date', 'close_price', 'volume', 'deliv_qty', 'price_change', 'price_change_pct', 'deliv_change', 'deliv_change_pct']]
+            return merged[['symbol', 'series', 'date', 'close_price', 'volume', 'deliv_qty', 'price_change', 'price_change_pct', 'deliv_change', 'deliv_change_pct']]
         else:
             return pd.DataFrame() # Return empty DataFrame if no data for the period
     
@@ -436,7 +451,7 @@ def main():
     # Check if URL is provided
     if not sheet_url:
         st.warning("Please provide a Google Sheets URL to load data")
-        st.info("📝 **Instructions:**\n1. Make your raw data Google Sheet (e.g., 'NSE_2025') publicly accessible.\n2. Copy the full URL from your browser.\n3. Paste it in the sidebar.\n\n**Expected Raw Column Names (any of these variants will work):**\n- **Date**: Date, Date1, DateTime, Timestamp, Day, Trading_Date\n- **Symbol**: Symbol, Stock_Symbol, Ticker, Scrip, Instrument\n- **Close Price**: Close_Price, Close, Closing_Price, LAST_PRICE, LTP\n- **Previous Close**: PREV_CLOSE, Previous_Close, Prev_Close_Price\n- **Volume**: Volume, TTL_TRD_QNTY, Traded_Quantity, Qty\n- **Delivery**: DELIV_QTY, Delivery_Quantity, Del_Qty")
+        st.info("📝 **Instructions:**\n1. Make your raw data Google Sheet (e.g., 'NSE_2025') publicly accessible.\n2. Copy the full URL from your browser.\n3. Paste it in the sidebar.\n\n**Expected Raw Column Names (any of these variants will work):**\n- **Date**: Date, Date1, DateTime, Timestamp, Day, Trading_Date\n- **Symbol**: Symbol, Stock_Symbol, Ticker, Scrip, Instrument\n- **Series**: SERIES, Stock_Series\n- **Close Price**: Close_Price, Close, Closing_Price, LAST_PRICE, LTP\n- **Previous Close**: PREV_CLOSE, Previous_Close, Prev_Close_Price\n- **Volume**: Volume, TTL_TRD_QNTY, Traded_Quantity, Qty\n- **Delivery Quantity**: DELIV_QTY, Delivery_Quantity, Del_Qty\n- **Delivery Percentage**: DELIV_PER, Delivery_Percentage, Delivery_Per")
         return
     
     # Load data
@@ -511,7 +526,8 @@ def main():
     # Search filter
     search_term = st.sidebar.text_input("Search Stocks", "")
     if search_term:
-        categorized_df = categorized_df[categorized_df['symbol'].str.contains(search_term, case=False, na=False)]
+        categorized_df = categorized_df[categorized_df['symbol'].str.contains(search_term, case=False, na=False) | 
+                                        categorized_df['series'].str.contains(search_term, case=False, na=False).fillna(False)]
     
     # Category filter
     categories = ['All'] + sorted(list(categorized_df['category'].unique()))
@@ -576,8 +592,9 @@ def main():
             st.write("**Top Gainers**")
             # Ensure price_change_pct exists before sorting
             if 'price_change_pct' in categorized_df.columns:
-                top_gainers = categorized_df.nlargest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
-                st.dataframe(top_gainers, use_container_width=True, hide_index=True)
+                top_gainers = categorized_df.nlargest(5, 'price_change_pct')[['symbol', 'series', 'close_price', 'price_change_pct', 'signal_strength']]
+                top_gainers['Stock'] = top_gainers['symbol'] + '-' + top_gainers['series']
+                st.dataframe(top_gainers[['Stock', 'close_price', 'price_change_pct', 'signal_strength']], use_container_width=True, hide_index=True)
             else:
                 st.info("Price change data not available for Top Gainers.")
         
@@ -585,8 +602,9 @@ def main():
             st.write("**Top Losers**")
             # Ensure price_change_pct exists before sorting
             if 'price_change_pct' in categorized_df.columns:
-                top_losers = categorized_df.nsmallest(5, 'price_change_pct')[['symbol', 'close_price', 'price_change_pct', 'signal_strength']]
-                st.dataframe(top_losers, use_container_width=True, hide_index=True)
+                top_losers = categorized_df.nsmallest(5, 'price_change_pct')[['symbol', 'series', 'close_price', 'price_change_pct', 'signal_strength']]
+                top_losers['Stock'] = top_losers['symbol'] + '-' + top_losers['series']
+                st.dataframe(top_losers[['Stock', 'close_price', 'price_change_pct', 'signal_strength']], use_container_width=True, hide_index=True)
             else:
                 st.info("Price change data not available for Top Losers.")
         
@@ -611,7 +629,9 @@ def main():
         display_df = categorized_df.sort_values(sort_by, ascending=ascending, na_position='last')
         
         # Display table with custom formatting
-        display_columns = ['symbol', 'close_price', 'price_change_pct', 'deliv_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
+        # Add 'Stock' column for combined symbol-series display
+        display_df['Stock'] = display_df['symbol'] + '-' + display_df['series']
+        display_columns = ['Stock', 'close_price', 'price_change_pct', 'deliv_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']
         available_display_cols = [col for col in display_columns if col in display_df.columns]
         
         if available_display_cols:
@@ -640,14 +660,13 @@ def main():
                 return val
 
             if 'signal_strength' in display_df_formatted.columns:
-                display_df_html = display_df_formatted.to_html(escape=False, index=False)
-                # Replace plain text signal strength with styled HTML
+                # Convert to HTML and apply custom styling
+                html_table = display_df_formatted.to_html(escape=False, index=False)
                 for original_signal in categorized_df['signal_strength'].unique():
-                    if original_signal: # Avoid None/NaN
+                    if original_signal:
                         styled_signal_html = color_signal(original_signal)
-                        # Replace only the specific cell content, not general text
-                        display_df_html = display_df_html.replace(f'<td>{original_signal}</td>', f'<td>{styled_signal_html}</td>')
-                st.markdown(display_df_html, unsafe_allow_html=True)
+                        html_table = html_table.replace(f'<td>{original_signal}</td>', f'<td>{styled_signal_html}</td>')
+                st.markdown(html_table, unsafe_allow_html=True)
             else:
                 st.dataframe(display_df_formatted, use_container_width=True, hide_index=True)
         else:
@@ -656,7 +675,10 @@ def main():
         # Export functionality
         st.subheader("Export Data")
         if st.button("Generate CSV Download"):
-            csv = categorized_df.to_csv(index=False)
+            # Ensure the exported CSV uses the correct 'Stock' column if desired, or original symbol/series
+            export_df = categorized_df.copy()
+            export_df['Stock'] = export_df['symbol'] + '-' + export_df['series']
+            csv = export_df[['Stock', 'close_price', 'price_change_pct', 'deliv_change_pct', 'volume', 'deliv_qty', 'category', 'signal_strength']].to_csv(index=False)
             st.download_button(
                 label="📥 Download CSV",
                 data=csv,
