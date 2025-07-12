@@ -1,405 +1,539 @@
-# App.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import random
-import time
-import requests # Import requests for fetching data from URL
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import requests
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-# Try to import OpenAI with error handling
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-    st.warning("OpenAI module not installed. AI features will be disabled.")
+# Page config
+st.set_page_config(
+    page_title="NSE Price & Volume Analysis",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# --- Configuration for API Keys ---
-# WARNING: Embedding API keys directly in code is NOT recommended for security reasons.
-# For production deployments, always use Streamlit Secrets or environment variables.
-OPENAI_API_KEY_DIRECT = "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"
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
+    }
+    .insight-box {
+        background-color: #e8f4fd;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #17a2b8;
+        margin: 1rem 0;
+    }
+    .alert-box {
+        background-color: #fff3cd;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #ffc107;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# Initialize OpenAI client
-if OPENAI_AVAILABLE:
+# Chat response function (moved to top)
+def generate_chat_response(prompt, df):
+    """Generate intelligent responses based on the data"""
+    prompt_lower = prompt.lower()
+    
     try:
-        # Using the directly embedded key as requested
-        openai_client = OpenAI(api_key=OPENAI_API_KEY_DIRECT)
-    except Exception as e:
-        st.error(f"Error initializing OpenAI client: {e}. Please check your API key.")
-        openai_client = None # Set to None if key is missing to prevent errors
-else:
-    openai_client = None
+        # Strong buy signals
+        if 'strong buy' in prompt_lower or 'buy signal' in prompt_lower:
+            strong_buys = df[df['PV_SIGNAL'] == 'STRONG_BUY']
+            if len(strong_buys) > 0:
+                top_buys = strong_buys.nlargest(5, 'PRICE_CHANGE_PCT')
+                response = f"📈 **{len(strong_buys)} stocks** showing strong buy signals:\n\n"
+                for _, stock in top_buys.iterrows():
+                    response += f"• **{stock['SYMBOL']}**: {stock['PRICE_CHANGE_PCT']:.1f}% ↑, Volume: {stock['TOTTRDQTY']:,.0f}\n"
+                return response
+            else:
+                return "No strong buy signals found in the current data."
+        
+        # Volume analysis
+        elif 'volume' in prompt_lower and ('high' in prompt_lower or 'unusual' in prompt_lower):
+            high_volume = df[df['VOLUME_CHANGE_PCT'] > 50]
+            if len(high_volume) > 0:
+                top_volume = high_volume.nlargest(5, 'VOLUME_CHANGE_PCT')
+                response = f"📊 **{len(high_volume)} stocks** with unusual volume activity:\n\n"
+                for _, stock in top_volume.iterrows():
+                    response += f"• **{stock['SYMBOL']}**: {stock['VOLUME_CHANGE_PCT']:.1f}% volume increase, Price: {stock['PRICE_CHANGE_PCT']:.1f}%\n"
+                return response
+            else:
+                return "No unusual volume activity detected in the current data."
+        
+        # Top gainers
+        elif 'gainer' in prompt_lower or 'top performer' in prompt_lower:
+            top_gainers = df.nlargest(5, 'PRICE_CHANGE_PCT')
+            response = "🔥 **Top 5 Gainers Today:**\n\n"
+            for _, stock in top_gainers.iterrows():
+                response += f"• **{stock['SYMBOL']}**: {stock['PRICE_CHANGE_PCT']:.1f}% ↑, Signal: {stock['PV_SIGNAL']}\n"
+            return response
+        
+        # Top losers
+        elif 'loser' in prompt_lower or 'worst performer' in prompt_lower:
+            top_losers = df.nsmallest(5, 'PRICE_CHANGE_PCT')
+            response = "📉 **Top 5 Losers Today:**\n\n"
+            for _, stock in top_losers.iterrows():
+                response += f"• **{stock['SYMBOL']}**: {stock['PRICE_CHANGE_PCT']:.1f}% ↓, Signal: {stock['PV_SIGNAL']}\n"
+            return response
+        
+        # Specific stock query
+        elif any(symbol in prompt.upper() for symbol in df['SYMBOL'].values):
+            for symbol in df['SYMBOL'].values:
+                if symbol in prompt.upper():
+                    stock_data = df[df['SYMBOL'] == symbol].iloc[0]
+                    insights = generate_stock_insights(stock_data)
+                    response = f"📊 **Analysis for {symbol}:**\n\n"
+                    response += f"• Price: ₹{stock_data['CLOSE']:.2f} ({stock_data['PRICE_CHANGE_PCT']:.1f}%)\n"
+                    response += f"• Volume: {stock_data['TOTTRDQTY']:,.0f}\n"
+                    response += f"• Signal: {stock_data['PV_SIGNAL']}\n\n"
+                    response += "**Key Insights:**\n"
+                    for insight in insights:
+                        response += f"• {insight}\n"
+                    return response
+        
+        # Market summary
+        elif 'market' in prompt_lower and 'summary' in prompt_lower:
+            total_stocks = len(df)
+            gainers = len(df[df['PRICE_CHANGE_PCT'] > 0])
+            losers = len(df[df['PRICE_CHANGE_PCT'] < 0])
+            avg_change = df['PRICE_CHANGE_PCT'].mean()
+            
+            response = f"📊 **Market Summary:**\n\n"
+            response += f"• Total Stocks: {total_stocks}\n"
+            response += f"• Gainers: {gainers} ({gainers/total_stocks*100:.1f}%)\n"
+            response += f"• Losers: {losers} ({losers/total_stocks*100:.1f}%)\n"
+            response += f"• Average Change: {avg_change:.2f}%\n"
+            response += f"• Strong Signals: {len(df[df['PV_SIGNAL'].isin(['STRONG_BUY', 'STRONG_SELL'])])}\n"
+            return response
+        
+        # Default response
+        else:
+            return """I can help you analyze the NSE data! Try asking:
+            
+• "Which stocks have strong buy signals?"
+• "Show me stocks with unusual volume activity"
+• "Top gainers today"
+• "Market summary"
+• "Analysis for [STOCK_SYMBOL]"
 
-# --- Data Loading Function ---
-@st.cache_data(ttl=600) # Cache data for 10 minutes
-def load_data_from_csv(url):
+What would you like to know about today's market data?"""
+    
+    except Exception as e:
+        return f"I encountered an error analyzing the data: {str(e)}. Please try rephrasing your question."
+
+# Title
+st.markdown('<h1 class="main-header">📊 NSE Price & Volume Analysis Dashboard</h1>', unsafe_allow_html=True)
+st.markdown("### Dynamic insights from NSE Bhavcopy data with intelligent analysis")
+
+# Data loading function
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_nse_data(url):
+    """Load NSE bhavcopy data from Google Sheets"""
     try:
         df = pd.read_csv(url)
-        # Clean column names: lowercase, replace spaces with underscores
-        df.columns = df.columns.str.lower().str.replace(" ", "_")
+        # Clean column names
+        df.columns = df.columns.str.strip().str.upper()
+        
+        # Convert numeric columns
+        numeric_cols = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'LAST', 'PREVCLOSE', 'TOTTRDQTY', 'TOTTRDVAL', 'TOTALTRADES']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Calculate derived metrics
+        df['PRICE_CHANGE'] = df['CLOSE'] - df['PREVCLOSE']
+        df['PRICE_CHANGE_PCT'] = (df['PRICE_CHANGE'] / df['PREVCLOSE']) * 100
+        df['VOLUME_CHANGE'] = df['TOTTRDQTY'] - df.get('PREV_VOLUME', 0)  # If prev volume available
+        df['VOLUME_CHANGE_PCT'] = ((df['TOTTRDQTY'] - df.get('PREV_VOLUME', df['TOTTRDQTY'])) / df.get('PREV_VOLUME', df['TOTTRDQTY'])) * 100
+        df['VWAP'] = df['TOTTRDVAL'] / df['TOTTRDQTY']  # Volume Weighted Average Price
+        df['TURNOVER_RATIO'] = df['TOTTRDVAL'] / 1000000  # in millions
+        
+        # Price Volume Analysis
+        df['PV_SIGNAL'] = 'NEUTRAL'
+        df.loc[(df['PRICE_CHANGE_PCT'] > 2) & (df['VOLUME_CHANGE_PCT'] > 20), 'PV_SIGNAL'] = 'STRONG_BUY'
+        df.loc[(df['PRICE_CHANGE_PCT'] > 0) & (df['VOLUME_CHANGE_PCT'] > 10), 'PV_SIGNAL'] = 'BUY'
+        df.loc[(df['PRICE_CHANGE_PCT'] < -2) & (df['VOLUME_CHANGE_PCT'] > 20), 'PV_SIGNAL'] = 'STRONG_SELL'
+        df.loc[(df['PRICE_CHANGE_PCT'] < 0) & (df['VOLUME_CHANGE_PCT'] > 10), 'PV_SIGNAL'] = 'SELL'
+        
         return df
     except Exception as e:
-        st.error(f"Error loading or processing data: {e}")
-        st.error("Failed to load or process data from Google Sheets")
-        st.error("Troubleshooting:")
-        st.error("Check if the sheet is publicly accessible.")
-        st.error("Verify the URL is correct.")
-        st.error("Ensure the sheet contains the expected raw columns and valid data.")
-        st.error("Check the column names match expected formats (case-insensitive, spaces replaced by underscores)")
-        return pd.DataFrame() # Return empty DataFrame on error
+        st.error(f"Error loading data: {str(e)}")
+        return None
 
-# --- Simulate Financial Data Functions (now uses loaded data) ---
-def fetch_watchlist_data(df):
-    """Fetches data for watchlist stocks from the loaded DataFrame."""
-    watchlist = ["RELIANCE", "INFY", "TATAMOTORS", "HDFCBANK", "BTC"]
-    watchlist_data = {}
-    for symbol in watchlist:
-        # Case-insensitive search for symbol
-        stock_row = df[df["symbol"].str.lower() == symbol.lower()]
-        if not stock_row.empty:
-            # Assuming the CSV has columns like 'symbol', 'price', 'change', 'sentiment', 'sector'
-            # Adjust column names as per your actual CSV structure
-            data = stock_row.iloc[0].to_dict()
-            watchlist_data[data["symbol"]] = {
-                "price": data.get("price", "N/A"),
-                "change": data.get("change", "N/A"),
-                "sentiment": data.get("sentiment", "neutral"),
-                "sector": data.get("sector", "General")
-            }
-    return watchlist_data
+# Analysis functions
+def analyze_price_volume_relationship(df):
+    """Analyze price-volume relationship and generate insights"""
+    insights = []
+    
+    # Strong movers with volume
+    strong_movers = df[df['PV_SIGNAL'].isin(['STRONG_BUY', 'STRONG_SELL'])]
+    if len(strong_movers) > 0:
+        insights.append(f"🔥 **{len(strong_movers)} stocks** showing strong price movements with high volume support")
+    
+    # Unusual volume activity
+    high_volume = df[df['VOLUME_CHANGE_PCT'] > 50]
+    if len(high_volume) > 0:
+        insights.append(f"📈 **{len(high_volume)} stocks** showing unusual volume activity (>50% increase)")
+    
+    # Price breakouts
+    breakouts = df[df['CLOSE'] > df['HIGH'] * 0.98]  # Near day high
+    if len(breakouts) > 0:
+        insights.append(f"🚀 **{len(breakouts)} stocks** closing near day highs - potential breakouts")
+    
+    # Volume without price movement (accumulation/distribution)
+    accumulation = df[(df['VOLUME_CHANGE_PCT'] > 20) & (abs(df['PRICE_CHANGE_PCT']) < 1)]
+    if len(accumulation) > 0:
+        insights.append(f"🔄 **{len(accumulation)} stocks** showing volume accumulation with minimal price change")
+    
+    return insights
 
-# --- AI-Powered Content Generation Functions ---
+def get_sector_analysis(df):
+    """Analyze sector-wise performance"""
+    if 'SERIES' in df.columns:
+        sector_performance = df.groupby('SERIES').agg({
+            'PRICE_CHANGE_PCT': ['mean', 'count'],
+            'TOTTRDVAL': 'sum'
+        }).round(2)
+        return sector_performance
+    return None
 
-def call_openai_chat_model(messages, model="gpt-3.5-turbo"):
-    """Helper function to call OpenAI's chat completion API."""
-    if not openai_client:
-        return "AI service is not configured. Please check API key."
-    try:
-        response = openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7, # Adjust creativity
-            max_tokens=300 # Limit response length
+def generate_stock_insights(stock_data):
+    """Generate insights for individual stock"""
+    insights = []
+    
+    price_change = stock_data['PRICE_CHANGE_PCT']
+    volume_change = stock_data.get('VOLUME_CHANGE_PCT', 0)
+    signal = stock_data['PV_SIGNAL']
+    
+    # Price analysis
+    if price_change > 5:
+        insights.append(f"📈 Strong bullish momentum with {price_change:.1f}% price increase")
+    elif price_change < -5:
+        insights.append(f"📉 Significant bearish pressure with {price_change:.1f}% price decline")
+    elif abs(price_change) < 0.5:
+        insights.append(f"😐 Consolidation phase with minimal price movement ({price_change:.1f}%)")
+    
+    # Volume analysis
+    if volume_change > 100:
+        insights.append(f"🔊 Exceptional volume surge of {volume_change:.1f}% - strong institutional interest")
+    elif volume_change > 50:
+        insights.append(f"📊 High volume activity with {volume_change:.1f}% increase")
+    elif volume_change < -30:
+        insights.append(f"📉 Below average volume - lack of conviction")
+    
+    # Combined analysis
+    if signal == 'STRONG_BUY':
+        insights.append(f"🚀 **STRONG BUY SIGNAL** - Price up with volume support")
+    elif signal == 'STRONG_SELL':
+        insights.append(f"⚠️ **STRONG SELL SIGNAL** - Price down with volume confirmation")
+    elif signal == 'BUY':
+        insights.append(f"✅ **BUY SIGNAL** - Positive price action with volume")
+    elif signal == 'SELL':
+        insights.append(f"❌ **SELL SIGNAL** - Negative price action with volume")
+    
+    return insights
+
+# Sidebar controls
+st.sidebar.header("📊 Dashboard Controls")
+
+# Data source
+data_url = st.sidebar.text_input(
+    "Google Sheets CSV URL",
+    value="https://docs.google.com/spreadsheets/d/1rCqDMaUwrT2mHKeHGjyWAA6vZ5qel-AVg7Atk1ef68Y/export?format=csv&gid=988176658",
+    help="Enter your Google Sheets CSV export URL"
+)
+
+# Load data
+with st.spinner("Loading NSE Bhavcopy data..."):
+    df = load_nse_data(data_url)
+
+if df is not None and not df.empty:
+    st.sidebar.success(f"✅ Data loaded: {len(df)} stocks")
+    
+    # Filters
+    st.sidebar.subheader("🔍 Filters")
+    
+    # Price change filter
+    price_change_range = st.sidebar.slider(
+        "Price Change % Range",
+        min_value=-20.0,
+        max_value=20.0,
+        value=(-20.0, 20.0),
+        step=0.5
+    )
+    
+    # Volume filter
+    min_volume = st.sidebar.number_input(
+        "Minimum Volume",
+        min_value=0,
+        value=0,
+        step=1000
+    )
+    
+    # Signal filter
+    signal_filter = st.sidebar.multiselect(
+        "Price-Volume Signals",
+        options=['STRONG_BUY', 'BUY', 'NEUTRAL', 'SELL', 'STRONG_SELL'],
+        default=['STRONG_BUY', 'BUY', 'NEUTRAL', 'SELL', 'STRONG_SELL']
+    )
+    
+    # Apply filters
+    filtered_df = df[
+        (df['PRICE_CHANGE_PCT'] >= price_change_range[0]) &
+        (df['PRICE_CHANGE_PCT'] <= price_change_range[1]) &
+        (df['TOTTRDQTY'] >= min_volume) &
+        (df['PV_SIGNAL'].isin(signal_filter))
+    ]
+    
+    # Main dashboard
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric(
+            "Total Stocks",
+            len(filtered_df),
+            delta=f"{len(filtered_df) - len(df)}" if len(filtered_df) != len(df) else None
         )
-        return response.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error communicating with OpenAI API: {e}")
-        return "I'm sorry, I'm having trouble connecting to my brain right now. Please try again later."
-
-
-def generate_hot_story_with_ai(market_context):
-    """
-    Generates a "Hot Market Story" using OpenAI's LLM based on given market context.
-    """
-    prompt = (
-        f"Based on the following market context, generate a concise, engaging headline "
-        f"and a brief impact summary for a 'Hot Market Story' for retail traders. "
-        f"Focus on the 'why' behind the movement and affected assets. "
-        f"Context: {market_context}"
-        f"\n\nFormat your response as: 'Headline: [Your Headline]\nImpact: [Your Impact]'"
-    )
     
-    messages = [{"role": "user", "content": prompt}]
-    generated_text = call_openai_chat_model(messages)
-
-    # Attempt to parse the generated text
-    parts = generated_text.split('\nImpact: ')
-    if len(parts) == 2:
-        title = parts[0].replace('Headline: ', '').strip()
-        impact = parts[1].strip()
-        return {"title": title, "impact": impact}
-    else:
-        # Fallback if AI doesn't follow format
-        return {"title": "AI Story Generation Issue", "impact": generated_text}
-
-
-def get_hot_stories_from_ai():
-    """Fetches AI-generated hot stories."""
-    hot_stories = []
-    contexts = [
-        "Recent positive earnings reports from major Indian IT companies and optimistic global tech forecasts.",
-        "Anticipated surge in vehicle sales during upcoming Indian festivals and government incentives for EVs.",
-        "Sudden increase in global crude oil and metal prices due to geopolitical tensions in the Middle East.",
-        "Reserve Bank of India's latest monetary policy announcement, keeping key interest rates unchanged, affecting banking sector.",
-        "Recent approvals of Bitcoin ETFs in major global markets and increasing institutional adoption of cryptocurrencies."
-    ]
+    with col2:
+        avg_price_change = filtered_df['PRICE_CHANGE_PCT'].mean()
+        st.metric(
+            "Avg Price Change %",
+            f"{avg_price_change:.2f}%",
+            delta=f"{avg_price_change:.2f}%"
+        )
     
-    # Generate 3 hot stories for the demo
-    for _ in range(3):
-        context = random.choice(contexts)
-        story = generate_hot_story_with_ai(context)
-        hot_stories.append(story)
-    return hot_stories
-
-# --- Simulated Premium Interests Data (for "Stories Just For You") ---
-PREMIUM_INTERESTS_DATA = {
-    "AI & Tech": [
-        {"title": "Mid-Cap AI Firm 'TechGen' Secures Major Government Contract", "asset": "TechGen Solutions", "signal": "Unusual insider buying detected."},
-        {"title": "Semiconductor Demand Soars Amidst AI Boom: Focus on 'ChipInnovate'", "asset": "ChipInnovate Ltd.", "signal": "Early analyst upgrades."},
-    ],
-    "Renewable Energy": [
-        {"title": "Solar Panel Manufacturing Booms: 'SunPower India' Expands Capacity", "asset": "SunPower India", "signal": "Positive regulatory news overlooked by market."},
-        {"title": "Green Hydrogen Policy Boosts 'GreenFuel Corp' Prospects", "asset": "GreenFuel Corp", "signal": "Increased institutional interest."},
-    ],
-    "Healthcare Innovation": [
-        {"title": "Biotech Startup 'GeneCure' Announces Breakthrough Drug Trial Results", "asset": "GeneCure Pharma", "signal": "Strong pre-market buzz."},
-        {"title": "Hospital Chain 'MediCare' Adopts AI for Patient Management", "asset": "MediCare Hospitals", "signal": "Partnership with leading tech firm."},
-    ]
-}
-
-def get_personalized_alerts(is_premium, user_interests=None):
-    """Simulates GenAI generating personalized trend alerts."""
-    alerts = []
-    if is_premium and user_interests:
-        for interest in user_interests:
-            if interest in PREMIUM_INTERESTS_DATA:
-                for item in PREMIUM_INTERESTS_DATA[interest]:
-                    alerts.append(f"💡 **New Opportunity in {interest}:** {item['title']} ({item['asset']}). Signal: {item['signal']}")
-    return alerts
-
-def generate_asset_story_ai_powered(asset_name, data):
-    """
-    Generates a concise asset story using OpenAI's LLM.
-    This would be for individual asset deep dives, potentially pulling more specific real-time data.
-    """
-    price_change = data.get('change', 'N/A')
-    sentiment = data.get('sentiment', 'neutral')
-    sector = data.get('sector', 'General')
-
-    prompt = (
-        f"Generate a concise, natural language story for {asset_name}, a {sector} sector asset. "
-        f"Its current price change is {price_change} and overall sentiment is {sentiment}. "
-        f"Explain the likely reasons for its current performance and what factors a retail trader should watch. "
-        f"Keep it brief and easy to understand, like a summary for a busy trader."
-    )
+    with col3:
+        total_turnover = filtered_df['TOTTRDVAL'].sum() / 1000000
+        st.metric(
+            "Total Turnover",
+            f"₹{total_turnover:,.0f}M"
+        )
     
-    messages = [{"role": "user", "content": prompt}]
-    return call_openai_chat_model(messages)
-
-
-def analyze_trade_ai_powered(trade_details):
-    """Analyzes a past trade using OpenAI's LLM."""
-    asset = trade_details['asset']
-    trade_type = trade_details['type']
-    outcome = trade_details['outcome']
-    entry_price = trade_details['entry_price']
-    exit_price = trade_details['exit_price']
-    trade_date = trade_details['date']
-
-    prompt = (
-        f"Analyze a past trade for a retail trader:\n"
-        f"Asset: {asset}\n"
-        f"Trade Type: {trade_type}\n"
-        f"Outcome: {outcome}\n"
-        f"Entry Price: {entry_price}\n"
-        f"Exit Price: {exit_price}\n"
-        f"Trade Date: {trade_date}\n\n"
-        f"Provide a concise debrief. If it was a profit, explain what likely went well. "
-        f"If a loss, suggest what might have gone wrong and provide 2-3 actionable learning suggestions "
-        f"for the trader to improve. Keep the language supportive and educational."
-    )
+    with col4:
+        strong_signals = len(filtered_df[filtered_df['PV_SIGNAL'].isin(['STRONG_BUY', 'STRONG_SELL'])])
+        st.metric(
+            "Strong Signals",
+            strong_signals
+        )
     
-    messages = [{"role": "user", "content": prompt}]
-    return call_openai_chat_model(messages)
-
-
-# --- AI Co-Pilot Chat Functionality ---
-def get_ai_chat_response(user_message, chat_history_st, watchlist_data):
-    """
-    Gets an AI agent's response to a user message using OpenAI's LLM.
-    Includes basic simulated tool calling logic.
-    """
-    lower_message = user_message.lower()
-
-    # --- Basic Tool Calling Simulation (App-side logic) ---
-    # This is a simple way to direct the AI to specific app functions.
-    # For more advanced tool calling, the LLM itself would output a function call.
-
-    # Check for asset story requests
-    for asset_name, data in watchlist_data.items():
-        # Check for full name or common short forms (e.g., "Reliance" for "Reliance Industries")
-        if asset_name.lower() in lower_message or \
-           (asset_name.split()[0].lower() in lower_message and \
-            any(kw in lower_message for kw in ["story", "doing", "about", "performance"])):
-            return generate_asset_story_ai_powered(asset_name, data)
+    # Market insights
+    st.markdown("---")
+    st.header("🧠 Market Insights")
     
-    # Check for hot stories/trends requests
-    if any(phrase in lower_message for phrase in ["hot stories", "hot trends", "trending", "market trends", "what's happening"]):
-        hot_stories = get_hot_stories_from_ai()
-        formatted_stories = "\n".join([f"- **{s['title']}**: {s['impact']}" for s in hot_stories])
-        return f"Here are today's hot stories:\n{formatted_stories}"
+    insights = analyze_price_volume_relationship(filtered_df)
+    for insight in insights:
+        st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
     
-    # If no specific tool call is detected, send to general AI chat
-    # Prepare chat history for LLM
-    llm_chat_history = [{"role": "assistant" if msg["role"] == "assistant" else "user", "content": msg["message"]} for msg in chat_history_st]
-    llm_chat_history.append({"role": "user", "content": user_message})
-
-    return call_openai_chat_model(llm_chat_history)
-
-
-# --- User Authentication (Simplified for demo) ---
-def authenticate_user():
-    st.sidebar.header("User Status")
-    is_premium = st.sidebar.checkbox("Enable Premium Features (Simulated)", value=False)
-    return is_premium
-
-# --- Main Streamlit App Layout ---
-def main():
-    st.set_page_config(layout="wide", page_title="EZTrade: Your AI Co-Pilot")
-
-    st.title("EZTrade: Your AI Co-Pilot for Smarter Trades")
-    st.write("Transforming market noise into clear, actionable narratives.")
-
-    is_premium = authenticate_user()
+    # Interactive charts
+    st.markdown("---")
+    st.header("📈 Interactive Analysis")
     
-    # Load data from CSV
-    csv_url = "https://docs.google.com/spreadsheets/d/1rCqDMaUwrT2mHKeHGjyWAA6vZ5qel-AVg7Atk1ef68Y/export?format=csv&gid=988176658"
-    df = load_data_from_csv(csv_url)
-
-    # Only proceed if DataFrame is not empty
-    if not df.empty:
-        watchlist_data = fetch_watchlist_data(df) # Fetch watchlist data from loaded DataFrame
-
-        st.markdown("---")
-
-        # 1. My Watchlist First
-        st.header("My Watchlist Stories")
-        st.write("Quick insights for the assets you care about most.")
-
-        cols = st.columns(len(watchlist_data))
-        for i, (asset, data) in enumerate(watchlist_data.items()):
-            with cols[i]:
-                card_title = f"{asset} ({data['change']})"
-                if data['sentiment'] == 'positive' or data['sentiment'] == 'bullish':
-                    st.markdown(f"**<p style='color:green;'>{card_title} ↑</p>**", unsafe_allow_html=True)
-                elif data['sentiment'] == 'negative' or data['sentiment'] == 'bearish':
-                    st.markdown(f"**<p style='color:red;'>{card_title} ↓</p>**", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"**<p style='color:orange;'>{card_title} ↔</p>**", unsafe_allow_html=True)
-
-                if st.button(f"View Story for {asset}", key=f"watchlist_btn_{asset}"):
-                    with st.expander(f"**{asset} - The Full Story**", expanded=True):
-                        # This now calls the AI-powered story generation
-                        st.write(generate_asset_story_ai_powered(asset, data))
-                        st.write(f"**Sector:** {data['sector']}")
-                        st.write("*(This narrative is generated by a live AI based on simulated data.)*")
-                st.markdown("---")
-
-        st.markdown("---")
-
-        # 2. Hot Stories of the Day (Now AI-Generated)
-        st.header("🔥 Hot Market Stories Today (AI-Generated)")
-        st.write("The biggest narratives moving the overall market, synthesized by AI.")
-
-        hot_stories_ai = get_hot_stories_from_ai()
-        for story in hot_stories_ai:
-            st.subheader(f"Headline: {story['title']}")
-            st.write(f"**Impact:** {story['impact']}")
-            st.write("*(These stories are dynamically generated by AI based on simulated market context.)*")
-            st.markdown("---")
-
-        st.markdown("---")
-
-        # 3. My Interests, My Stories (Premium Feature)
-        st.header("💡 Stories Just For You (Premium Feature)")
-        if is_premium:
-            st.write("AI-powered insights tailored to your specific trading interests, helping you spot unique opportunities.")
-            user_selected_interests = st.multiselect(
-                "Select your interests to see personalized stories:",
-                list(PREMIUM_INTERESTS_DATA.keys()),
-                default=["AI & Tech"]
+    tab1, tab2, tab3, tab4 = st.tabs(["Price vs Volume", "Top Movers", "Sector Analysis", "Individual Stock"])
+    
+    with tab1:
+        st.subheader("Price Change vs Volume Analysis")
+        
+        # Price-Volume scatter plot
+        fig = px.scatter(
+            filtered_df.head(200),  # Limit for performance
+            x='PRICE_CHANGE_PCT',
+            y='VOLUME_CHANGE_PCT',
+            color='PV_SIGNAL',
+            size='TOTTRDVAL',
+            hover_data=['SYMBOL', 'CLOSE', 'TOTTRDQTY'],
+            title="Price Change vs Volume Change Analysis",
+            labels={
+                'PRICE_CHANGE_PCT': 'Price Change %',
+                'VOLUME_CHANGE_PCT': 'Volume Change %'
+            }
+        )
+        fig.update_layout(height=600)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Price-Volume heatmap
+        st.subheader("Price-Volume Signal Distribution")
+        signal_counts = filtered_df['PV_SIGNAL'].value_counts()
+        fig_pie = px.pie(
+            values=signal_counts.values,
+            names=signal_counts.index,
+            title="Distribution of Price-Volume Signals"
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Top Movers by Price & Volume")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**🔥 Biggest Gainers**")
+            top_gainers = filtered_df.nlargest(10, 'PRICE_CHANGE_PCT')[['SYMBOL', 'CLOSE', 'PRICE_CHANGE_PCT', 'TOTTRDQTY', 'PV_SIGNAL']]
+            st.dataframe(top_gainers, use_container_width=True)
+        
+        with col2:
+            st.write("**📉 Biggest Losers**")
+            top_losers = filtered_df.nsmallest(10, 'PRICE_CHANGE_PCT')[['SYMBOL', 'CLOSE', 'PRICE_CHANGE_PCT', 'TOTTRDQTY', 'PV_SIGNAL']]
+            st.dataframe(top_losers, use_container_width=True)
+        
+        st.write("**📊 Highest Volume**")
+        high_volume = filtered_df.nlargest(10, 'TOTTRDQTY')[['SYMBOL', 'CLOSE', 'PRICE_CHANGE_PCT', 'TOTTRDQTY', 'PV_SIGNAL']]
+        st.dataframe(high_volume, use_container_width=True)
+    
+    with tab3:
+        st.subheader("Sector-wise Performance")
+        
+        if 'SERIES' in filtered_df.columns:
+            sector_data = filtered_df.groupby('SERIES').agg({
+                'PRICE_CHANGE_PCT': 'mean',
+                'TOTTRDVAL': 'sum',
+                'SYMBOL': 'count'
+            }).round(2)
+            sector_data.columns = ['Avg Price Change %', 'Total Turnover', 'Stock Count']
+            sector_data = sector_data.sort_values('Avg Price Change %', ascending=False)
+            
+            fig_sector = px.bar(
+                sector_data.reset_index(),
+                x='SERIES',
+                y='Avg Price Change %',
+                title="Average Price Change by Series",
+                color='Avg Price Change %',
+                color_continuous_scale='RdYlGn'
             )
-            if user_selected_interests:
-                personalized_alerts = get_personalized_alerts(is_premium, user_selected_interests)
-                if personalized_alerts:
-                    for alert in personalized_alerts:
-                        st.markdown(alert)
-                        st.write("*(These are early signals and nuanced insights, often missed by the general market.)*")
-                        st.markdown("---")
-                else:
-                    st.info("No personalized stories found for your selected interests today. Try different interests!")
-            else:
-                st.info("Select interests above to see personalized stories.")
+            fig_sector.update_layout(height=400)
+            st.plotly_chart(fig_sector, use_container_width=True)
+            
+            st.dataframe(sector_data, use_container_width=True)
         else:
-            st.warning("Unlock 'Stories Just For You' and other advanced features with EZTrade Premium!")
-            if st.button("Learn More about Premium"):
-                st.write("*(Imagine a link to your pricing page here)*")
+            st.info("Sector data not available in the dataset")
+    
+    with tab4:
+        st.subheader("Individual Stock Analysis")
+        
+        # Stock selector
+        selected_stock = st.selectbox(
+            "Select a stock for detailed analysis:",
+            filtered_df['SYMBOL'].unique(),
+            index=0
+        )
+        
+        if selected_stock:
+            stock_data = filtered_df[filtered_df['SYMBOL'] == selected_stock].iloc[0]
+            
+            # Stock metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Current Price", f"₹{stock_data['CLOSE']:.2f}")
+            with col2:
+                st.metric("Price Change", f"{stock_data['PRICE_CHANGE_PCT']:.2f}%", 
+                         delta=f"{stock_data['PRICE_CHANGE']:.2f}")
+            with col3:
+                st.metric("Volume", f"{stock_data['TOTTRDQTY']:,.0f}")
+            with col4:
+                st.metric("Signal", stock_data['PV_SIGNAL'])
+            
+            # Stock insights
+            st.subheader(f"📊 Insights for {selected_stock}")
+            stock_insights = generate_stock_insights(stock_data)
+            for insight in stock_insights:
+                st.markdown(f'<div class="insight-box">{insight}</div>', unsafe_allow_html=True)
+            
+            # OHLC Chart
+            if all(col in stock_data.index for col in ['OPEN', 'HIGH', 'LOW', 'CLOSE']):
+                fig_ohlc = go.Figure(data=go.Candlestick(
+                    x=[selected_stock],
+                    open=[stock_data['OPEN']],
+                    high=[stock_data['HIGH']],
+                    low=[stock_data['LOW']],
+                    close=[stock_data['CLOSE']]
+                ))
+                fig_ohlc.update_layout(
+                    title=f"{selected_stock} - OHLC",
+                    height=400,
+                    showlegend=False
+                )
+                st.plotly_chart(fig_ohlc, use_container_width=True)
+    
+    # Chat interface
+    st.markdown("---")
+    st.header("💬 Ask About Your Data")
+    
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": "Hi! I'm your NSE data analyst. Ask me about price movements, volume analysis, or any specific stocks. Try asking: 'Which stocks have strong buy signals?' or 'Show me stocks with unusual volume activity.'"
+        })
+    
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    
+    # Chat input
+    if prompt := st.chat_input("Ask about the market data..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        
+        # Generate response based on data
+        with st.chat_message("assistant"):
+            response = generate_chat_response(prompt, filtered_df)
+            st.markdown(response)
+        st.session_state.messages.append({"role": "assistant", "content": response})
 
-        st.markdown("---")
+else:
+    st.error("❌ Unable to load data. Please check your Google Sheets URL and ensure it's publicly accessible.")
+    st.info("Make sure your Google Sheet is published and the URL is in the correct format.")
 
-        # 4. Trade Debrief & Learn (Premium Feature)
-        st.header("📈 Trade Debrief & Learn (Premium Feature)")
-        if is_premium:
-            st.write("Get personalized feedback on your past trades to refine your strategy and avoid common pitfalls.")
-            st.info("*(In a real app, you would connect your brokerage account securely for automated debriefs.)*")
+# Footer
+st.markdown("---")
+st.markdown("### 📝 Additional Features")
+st.markdown("""
+**Key Features:**
+- Real-time NSE data analysis with price-volume insights
+- Interactive charts and visualizations
+- Intelligent chat interface for data queries
+- Customizable filters and analysis parameters
+- Sector-wise performance analysis
+- Individual stock deep-dive analysis
 
-            st.subheader("Simulate a Trade Debrief:")
-            sim_asset = st.selectbox("Select Asset for Debrief:", list(watchlist_data.keys()), key="sim_asset")
-            sim_trade_type = st.radio("Trade Type:", ["Buy", "Sell"], key="sim_trade_type")
-            sim_entry_price = st.number_input("Entry Price:", value=100.0, key="sim_entry_price")
-            sim_exit_price = st.number_input("Exit Price:", value=105.0, key="sim_exit_price")
-            sim_date = st.date_input("Trade Date:", pd.to_datetime('today'), key="sim_date")
+**Usage Tips:**
+- Use the sidebar filters to narrow down your analysis
+- Try different combinations of price and volume filters
+- Ask specific questions in the chat interface
+- Export data by right-clicking on tables
+- Refresh the page to reload latest data
 
-            sim_outcome = "Profit" if sim_exit_price > sim_entry_price else "Loss"
+**Chat Commands:**
+- "Market summary" - Get overall market overview
+- "Top gainers" - View best performing stocks
+- "Strong buy signals" - Find stocks with buy momentum
+- "Unusual volume" - Detect volume anomalies
+- "[SYMBOL] analysis" - Get detailed stock analysis
+""")
 
-            if st.button("Analyze This Trade", key="analyze_trade_btn"):
-                with st.spinner("Analyzing trade..."):
-                    # This now calls the AI-powered trade analysis
-                    ai_debrief_response = analyze_trade_ai_powered(
-                        {
-                            "asset": sim_asset,
-                            "type": sim_trade_type,
-                            "entry_price": sim_entry_price,
-                            "exit_price": sim_exit_price,
-                            "date": sim_date.strftime("%Y-%m-%d"),
-                            "outcome": sim_outcome
-                        }
-                    )
-                    st.markdown(ai_debrief_response)
-                st.write("\n---")
-                st.write("#### Personalized Learning Suggestions (from AI):")
-                st.write("- Review modules on 'Sentiment Analysis in Volatile Markets'.")
-                st.write("- Explore strategies for 'Early Exit Signals' to protect profits/limit losses.")
-                st.write("- Understand 'Sectoral Correlations' to anticipate broader market impact.")
-
-        else:
-            st.warning("Unlock 'Trade Debrief & Learn' to get personalized feedback on your trading performance with EZTrade Premium!")
-
-        st.markdown("---")
-
-        # --- AI Co-Pilot Chat Section ---
-        st.header("💬 EZTrade AI Co-Pilot Chat")
-        st.write("Chat with your AI assistant to get quick answers and insights.")
-
-        # Initialize chat history in session state
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-            st.session_state.messages.append({"role": "assistant", "message": "Hello! I'm your EZTrade AI Co-Pilot. How can I help you today? Try asking for 'story for Reliance' or 'hot stories'."})
-
-        # Display chat messages
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["message"])
-
-        # User input
-        if prompt := st.chat_input("Ask me anything about the market..."):
-            st.session_state.messages.append({"role": "user", "message": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    # Pass watchlist_data to the AI for potential tool calling
-                    ai_response = get_ai_chat_response(prompt, st.session_state.messages, watchlist_data)
-                    st.markdown(ai_response)
-                st.session_state.messages.append({"role": "assistant", "message": ai_response})
-
-        st.markdown("---")
-        st.sidebar.markdown("---")
-        st.sidebar.info("EZTrade: Your intelligent co-pilot for the Indian stock market. Built for clarity, powered by AI.")
-
-    else:
-        st.error("Could not load data from the provided CSV URL. Please check the URL and accessibility.")
-
-if __name__ == "__main__":
-    main()
+st.markdown("---")
+st.markdown("*Built with ❤️ using Streamlit | Data: NSE Bhavcopy*")
