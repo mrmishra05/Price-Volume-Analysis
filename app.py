@@ -4,8 +4,15 @@ import pandas as pd
 import numpy as np
 import random
 import time
-from openai import OpenAI # Import the OpenAI client library
 import requests # Import requests for fetching data from URL
+
+# Try to import OpenAI with error handling
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    st.warning("OpenAI module not installed. AI features will be disabled.")
 
 # --- Configuration for API Keys ---
 # WARNING: Embedding API keys directly in code is NOT recommended for security reasons.
@@ -13,12 +20,15 @@ import requests # Import requests for fetching data from URL
 OPENAI_API_KEY_DIRECT = "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"
 
 # Initialize OpenAI client
-try:
-    # Using the directly embedded key as requested
-    openai_client = OpenAI(api_key=OPENAI_API_KEY_DIRECT)
-except Exception as e:
-    st.error(f"Error initializing OpenAI client: {e}. Please check your API key.")
-    openai_client = None # Set to None if key is missing to prevent errors
+if OPENAI_AVAILABLE:
+    try:
+        # Using the directly embedded key as requested
+        openai_client = OpenAI(api_key=OPENAI_API_KEY_DIRECT)
+    except Exception as e:
+        st.error(f"Error initializing OpenAI client: {e}. Please check your API key.")
+        openai_client = None # Set to None if key is missing to prevent errors
+else:
+    openai_client = None
 
 # --- Data Loading Function ---
 @st.cache_data(ttl=600) # Cache data for 10 minutes
