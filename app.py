@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 # --- Configuration ---
 # URL for daily Bhavcopy ZIP files from NSE archives
 # Note: NSE URL structures can change. If you encounter 404s, verify the latest URL on NSE's site.
-NSE_BHAVCOPY_URL = "https://archives.nseindia.com/content/historical/EQUITIES/{YEAR}/{MON}/cm{DD}{MON}{YEAR}bhav.csv.zip"
+NSE_BHAVCOPY_URL = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip"
 
 # Mapping month numbers to NSE's three-letter abbreviations (e.g., 1 -> JAN)
 MONTH_MAP = {
