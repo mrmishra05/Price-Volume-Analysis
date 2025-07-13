@@ -6,17 +6,19 @@ import io
 from datetime import datetime, timedelta
 
 # --- Configuration ---
-# The URL might need to be dynamic or updated if NSE changes it again.
-# Keep the current one, but be aware it might break in the future.
+# URL for daily Bhavcopy ZIP files from NSE archives
 NSE_BHAVCOPY_URL = "https://archives.nseindia.com/content/historical/EQUITIES/{YEAR}/{MON}/cm{DD}{MON}{YEAR}bhav.csv.zip"
+
+# Mapping month numbers to NSE's three-letter abbreviations
 MONTH_MAP = {
     1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
     7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC"
 }
 
-# Add a list of known holidays for 2025 (you'd need to maintain this)
-# This is a partial list, you'd want to get a comprehensive one from NSE or a reliable source.
+# Partial list of NSE Trading Holidays for 2025 (you must maintain this for accuracy)
+# Data source: https://www.nseindia.com/products-services/equity-market-holidays
 NSE_HOLIDAYS_2025 = [
+    datetime(2025, 1, 26).date(),  # Republic Day
     datetime(2025, 2, 26).date(),  # Mahashivratri
     datetime(2025, 3, 14).date(),  # Holi
     datetime(2025, 3, 31).date(),  # Eid-Ul-Fitr
@@ -33,179 +35,330 @@ NSE_HOLIDAYS_2025 = [
     datetime(2025, 12, 25).date()  # Christmas
 ]
 
-@st.cache_data(ttl=3600) # Cache data for 1 hour to avoid repeated downloads
-def fetch_bhavcopy(date: datetime.date):
+# --- Data Fetching and Processing ---
+
+@st.cache_data(ttl=3600) # Cache each daily download for 1 hour
+def fetch_single_day_bhavcopy(date: datetime.date):
     """
-    Fetches the NSE Bhavcopy for a given date.
-    Returns a pandas DataFrame if successful, None otherwise.
+    Fetches and processes Bhavcopy for a single specific date from NSE archives.
+    Returns a pandas DataFrame for that day, or None if not found/error.
     """
+    # Check for weekend or holiday before attempting download
+    if date.weekday() >= 5 or date in NSE_HOLIDAYS_2025:
+        return None # Return None for non-trading days
+
     year = date.year
     month_abbr = MONTH_MAP[date.month]
     day = date.day
-
+    
     url = NSE_BHAVCOPY_URL.format(
         YEAR=year,
         MON=month_abbr,
-        DD=f"{day:02d}"
+        DD=f"{day:02d}"  # Ensures day is two digits (e.g., 01, 05)
     )
-
-    st.info(f"Attempting to fetch bhavcopy from: {url}")
-
+    
+    # Use a common User-Agent to mimic a browser, as NSE might block simple requests
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status() 
+        response = requests.get(url, headers=headers, timeout=10) # Added timeout
+        response.raise_for_status() # Raises HTTPError for 4xx/5xx responses
 
+        # Check if the content is actually a zip file. NSE might return a small HTML error page.
         if not zipfile.is_zipfile(io.BytesIO(response.content)):
-            st.error(f"Downloaded file for {date.strftime('%d-%b-%Y')} is not a valid ZIP file. It might be a holiday or data is not yet available.")
-            return None
+            return None # Not a valid zip, likely no data for the day
 
         with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+            # Find the CSV file within the zip (usually only one)
             csv_file_name = [name for name in z.namelist() if name.endswith('.csv')][0]
             with z.open(csv_file_name) as f:
                 df = pd.read_csv(f)
+                
+                # --- Standardize and Clean Column Names ---
+                df.columns = [col.strip().upper() for col in df.columns]
+
+                # Map inconsistent NSE column names to standard internal names
+                # This ensures consistent naming regardless of subtle NSE changes
+                column_rename_map = {
+                    "TIMESTAMP": "DATE", # Standardize any date/timestamp column to 'DATE' initially
+                    "DATE1": "DATE",
+                    "PREV_CLOSE": "PREVCLOSE",
+                    "OPEN_PRICE": "OPEN",
+                    "HIGH_PRICE": "HIGH",
+                    "LOW_PRICE": "LOW",
+                    "LAST_PRICE": "LAST",
+                    "CLOSE_PRICE": "CLOSE",
+                    "TOTTRDVOL": "TOTTRDQTY", # Total Traded Volume -> Total Traded Quantity
+                    "TOTTRDVAL": "TOTTRDVAL", # Total Traded Value (already good)
+                    "NO_OF_TRADES": "TOTALTRADES",
+                    "AVG_PRICE": "AVG_PRICE",
+                    "DELIV_QTY": "DELIV_QTY",
+                    "DELIV_PER": "DELIV_PER"
+                }
+                df.rename(columns=column_rename_map, inplace=True)
+
+                # Filter for 'EQ' (Equity) series only
+                if 'SERIES' in df.columns:
+                    df = df[df['SERIES'] == 'EQ']
+                else:
+                    # st.warning(f"Series column not found for {date.strftime('%Y-%m-%d')}. Proceeding without Series filter.")
+                    pass # Allow to proceed even if SERIES is missing
+
+                # Convert essential columns to numeric, coercing errors
+                numeric_cols = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'LAST', 'PREVCLOSE', 'TOTTRDQTY', 'TOTTRDVAL', 'TOTALTRADES', 'AVG_PRICE', 'DELIV_QTY', 'DELIV_PER']
+                for col in numeric_cols:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) # Fill NaN with 0 for calculations
+                    
+                # Add a consistent 'TIMESTAMP' column for all data points
+                df['TIMESTAMP'] = pd.to_datetime(date)
+                
+                # Drop rows with NaN in critical columns needed for analysis
+                df.dropna(subset=['SYMBOL', 'TIMESTAMP', 'CLOSE', 'TOTTRDQTY'], inplace=True)
+                
                 return df
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching data for {date.strftime('%d-%b-%Y')}: {e}")
-        return None
-    except IndexError:
-        st.error(f"No CSV file found inside the zip for {date.strftime('%d-%b-%Y')}. This might indicate data not being available.")
+        # st.error(f"Network error or 404 for {date.strftime('%d-%b-%Y')}. Skipping: {e}")
         return None
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
+        # st.error(f"Error processing bhavcopy for {date.strftime('%d-%b-%Y')}: {e}. Skipping.")
         return None
 
-def process_bhavcopy(df: pd.DataFrame):
-    if df is None:
-        return pd.DataFrame() 
+@st.cache_data(ttl=3600) # Cache the full historical data fetch for 1 hour
+def load_historical_bhavcopy(start_date: datetime.date, end_date: datetime.date):
+    """
+    Loads Bhavcopy data for a given date range by iterating through days.
+    """
+    all_dfs = []
+    current_date = start_date
+    
+    # Progress bar for long fetches
+    total_days = (end_date - start_date).days + 1
+    progress_bar_text = st.empty()
+    progress_bar = st.progress(0)
+    processed_count = 0
 
-    df.columns = [col.strip().upper() for col in df.columns]
+    while current_date <= end_date:
+        processed_count += 1
+        progress_value = processed_count / total_days
+        progress_bar.progress(progress_value)
+        progress_bar_text.text(f"Fetching data for {current_date.strftime('%d-%b-%Y')}... ({int(progress_value*100)}%)")
 
-    if 'SERIES' in df.columns:
-        df = df[df['SERIES'] == 'EQ']
+        df = fetch_single_day_bhavcopy(current_date)
+        if df is not None and not df.empty:
+            all_dfs.append(df)
+        current_date += timedelta(days=1)
+    
+    progress_bar.empty() # Remove progress bar
+    progress_bar_text.empty()
 
-    required_cols = ['SYMBOL', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'LAST', 'TOTTRDVOL', 'TOTTRDVAL']
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    if not all_dfs:
+        st.warning("No data found for the selected date range. This could be due to all days being weekends/holidays, or network/data issues. Please try a different range.")
+        return pd.DataFrame() # Return empty DataFrame
 
-    if missing_cols:
-        st.warning(f"Missing expected columns in Bhavcopy data: {', '.join(missing_cols)}. Displaying available data.")
+    full_df = pd.concat(all_dfs, ignore_index=True)
+    full_df.sort_values(by=['SYMBOL', 'TIMESTAMP'], inplace=True)
 
-    numeric_cols = ['OPEN', 'HIGH', 'LOW', 'CLOSE', 'LAST', 'TOTTRDVOL', 'TOTTRDVAL']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) 
+    # --- Calculate Daily Price and Volume Change (Shifted by 1 trading day) ---
+    # Ensure correct 'PREVCLOSE' by grouping by symbol before shifting
+    full_df['PREV_CLOSE_LAG'] = full_df.groupby('SYMBOL')['CLOSE'].shift(1)
+    full_df['DAILY_PRICE_CHANGE'] = full_df['CLOSE'] - full_df['PREV_CLOSE_LAG']
+    full_df['DAILY_PRICE_CHANGE_PCT'] = (full_df['DAILY_PRICE_CHANGE'] / full_df['PREV_CLOSE_LAG']) * 100
+    # Handle infinite values from division by zero (e.g., if prev_close was 0)
+    full_df['DAILY_PRICE_CHANGE_PCT'].replace([float('inf'), -float('inf')], 0, inplace=True)
+    full_df['DAILY_PRICE_CHANGE_PCT'].fillna(0, inplace=True) # Fill NaN from shift(1) for first day of a stock
 
-    if 'PREVCLOSE' in df.columns and 'CLOSE' in df.columns:
-        df['CHANGE'] = df['CLOSE'] - df['PREVCLOSE']
-        df['% CHANGE'] = (df['CHANGE'] / df['PREVCLOSE']) * 100
-    elif 'CLOSE' in df.columns and 'OPEN' in df.columns:
-        df['CHANGE'] = df['CLOSE'] - df['OPEN']
-        df['% CHANGE'] = (df['CHANGE'] / df['OPEN']) * 100
-    else:
-        df['CHANGE'] = 0.0
-        df['% CHANGE'] = 0.0
-        st.warning("Could not calculate daily change due to missing 'PREVCLOSE' or 'OPEN'/'CLOSE' columns.")
+    full_df['PREV_VOLUME_LAG'] = full_df.groupby('SYMBOL')['TOTTRDQTY'].shift(1)
+    full_df['DAILY_VOLUME_CHANGE'] = full_df['TOTTRDQTY'] - full_df['PREV_VOLUME_LAG']
+    full_df['DAILY_VOLUME_CHANGE_PCT'] = (full_df['DAILY_VOLUME_CHANGE'] / full_df['PREV_VOLUME_LAG']) * 100
+    full_df['DAILY_VOLUME_CHANGE_PCT'].replace([float('inf'), -float('inf')], 0, inplace=True)
+    full_df['DAILY_VOLUME_CHANGE_PCT'].fillna(0, inplace=True) # Fill NaN from shift(1) for first day of a stock
 
-    return df
+    return full_df
+
+# --- Trend Calculation Functions ---
+
+def get_trend_data(df: pd.DataFrame, period: str):
+    """
+    Aggregates data for price and volume trends based on the specified period.
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    # Ensure TIMESTAMP is datetime and set as index for resampling
+    df['TIMESTAMP'] = pd.to_datetime(df['TIMESTAMP'])
+    df_indexed = df.set_index('TIMESTAMP')
+
+    df_agg = pd.DataFrame() # Initialize empty DataFrame
+
+    if period == "Daily":
+        # For daily, we just return the relevant daily change columns
+        # Filter out rows where daily changes cannot be calculated (first day of stock in range)
+        df_agg = df_indexed.copy()
+        df_agg.dropna(subset=['DAILY_PRICE_CHANGE_PCT', 'DAILY_VOLUME_CHANGE_PCT'], inplace=True)
+        return df_agg[['SYMBOL', 'CLOSE', 'TOTTRDQTY', 'DAILY_PRICE_CHANGE_PCT', 'DAILY_VOLUME_CHANGE_PCT']]
+    
+    elif period == "Weekly":
+        # Group by symbol and then resample weekly ('W' for week-ending Sunday)
+        df_agg = df_indexed.groupby('SYMBOL').resample('W').agg(
+            Open=('OPEN', 'first'),        # Open of the first trading day of the week
+            Close=('CLOSE', 'last'),       # Close of the last trading day of the week
+            High=('HIGH', 'max'),
+            Low=('LOW', 'min'),
+            TotalVolume=('TOTTRDQTY', 'sum'), # Sum of volume for the week
+            NumTradingDays=('SYMBOL', 'count') # Count actual trading days in the week
+        ).reset_index()
+        df_agg.rename(columns={'TIMESTAMP': 'WEEK_END_DATE'}, inplace=True)
+
+    elif period == "Monthly":
+        # Group by symbol and then resample monthly ('M' for month-ending last day)
+        df_agg = df_indexed.groupby('SYMBOL').resample('M').agg(
+            Open=('OPEN', 'first'),
+            Close=('CLOSE', 'last'),
+            High=('HIGH', 'max'),
+            Low=('LOW', 'min'),
+            TotalVolume=('TOTTRDQTY', 'sum'),
+            NumTradingDays=('SYMBOL', 'count')
+        ).reset_index()
+        df_agg.rename(columns={'TIMESTAMP': 'MONTH_END_DATE'}, inplace=True)
+    
+    # Calculate period-over-period price and volume change for Weekly/Monthly
+    if not df_agg.empty:
+        # Sort to ensure correct shift for period-over-period change
+        period_date_col = 'WEEK_END_DATE' if period == "Weekly" else 'MONTH_END_DATE'
+        df_agg.sort_values(by=['SYMBOL', period_date_col], inplace=True)
+        
+        # Price change: (Current Period Close - Previous Period Close) / Previous Period Close
+        df_agg['PREV_PERIOD_CLOSE'] = df_agg.groupby('SYMBOL')['Close'].shift(1)
+        df_agg['PERIOD_PRICE_CHANGE_PCT'] = ( (df_agg['Close'] - df_agg['PREV_PERIOD_CLOSE']) / df_agg['PREV_PERIOD_CLOSE'] ) * 100
+        df_agg['PERIOD_PRICE_CHANGE_PCT'].replace([float('inf'), -float('inf')], 0, inplace=True)
+        df_agg['PERIOD_PRICE_CHANGE_PCT'].fillna(0, inplace=True)
+
+        # Volume change: (Current Period Total Volume - Previous Period Total Volume) / Previous Period Total Volume
+        df_agg['PREV_PERIOD_VOLUME'] = df_agg.groupby('SYMBOL')['TotalVolume'].shift(1)
+        df_agg['PERIOD_VOLUME_CHANGE_PCT'] = ( (df_agg['TotalVolume'] - df_agg['PREV_PERIOD_VOLUME']) / df_agg['PREV_PERIOD_VOLUME'] ) * 100
+        df_agg['PERIOD_VOLUME_CHANGE_PCT'].replace([float('inf'), -float('inf')], 0, inplace=True)
+        df_agg['PERIOD_VOLUME_CHANGE_PCT'].fillna(0, inplace=True)
+        
+        # Filter out NaN rows that arise from the first period for each stock (no previous period to compare)
+        df_agg.dropna(subset=['PERIOD_PRICE_CHANGE_PCT', 'PERIOD_VOLUME_CHANGE_PCT'], inplace=True)
+        
+        # Select and reorder columns for display
+        return df_agg[['SYMBOL', period_date_col, 'Open', 'Close', 'TotalVolume', 
+                       'PERIOD_PRICE_CHANGE_PCT', 'PERIOD_VOLUME_CHANGE_PCT', 'NumTradingDays']]
+    
+    return df_agg # Return empty if df_agg is empty
+
+# --- Streamlit App ---
 
 def main():
-    st.set_page_config(layout="wide", page_title="NSE Bhavcopy Analyzer")
+    st.set_page_config(layout="wide", page_title="NSE Historical Data Analyzer")
 
-    st.title("📊 NSE Bhavcopy Data Analyzer")
-    st.write("Fetch and analyze daily Bhavcopy data from the National Stock Exchange of India.")
+    st.title("📊 NSE Historical Data Analyzer")
+    st.write("Analyze daily, weekly, and monthly trends for NSE equities directly from NSE archives.")
 
-    st.sidebar.header("Settings")
-    selected_date = st.sidebar.date_input(
-        "Select Date",
-        value=datetime.now().date() - timedelta(days=1), # Default to yesterday
-        max_value=datetime.now().date() # Cannot select future date
+    st.sidebar.header("Data Fetching Options")
+    today = datetime.now().date()
+    # Default to a range ending yesterday, starting 30 days prior
+    default_end_date = today - timedelta(days=1)
+    default_start_date = default_end_date - timedelta(days=30) 
+
+    # Date range picker in the sidebar
+    date_range = st.sidebar.date_input(
+        "Select Date Range",
+        value=(default_start_date, default_end_date),
+        max_value=today, # Cannot select future dates
+        key="date_range_selector"
     )
+
+    # Ensure start_date and end_date are correctly extracted from the tuple
+    start_date = date_range[0]
+    end_date = date_range[1] if len(date_range) == 2 else start_date
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("How to Use:")
-    st.sidebar.info(
-        "1. Select a date to fetch Bhavcopy data.\n"
-        "2. The app will attempt to download and process the data.\n"
-        "3. Explore stock details, top gainers/losers, and high volume stocks."
+    st.sidebar.header("Analysis Options")
+    # Radio buttons for selecting the trend period
+    trend_period = st.sidebar.radio(
+        "Select Trend Period",
+        ("Daily", "Weekly", "Monthly"),
+        index=0 # Default to Daily
     )
 
-    if st.button("Fetch & Analyze Bhavcopy"):
-        st.subheader(f"Data for {selected_date.strftime('%d %B %Y')}")
+    if st.sidebar.button("Fetch & Analyze Data"):
+        st.subheader(f"Analyzing Data from {start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')}")
+        
+        # Load historical data for the selected range
+        full_bhavcopy_df = load_historical_bhavcopy(start_date, end_date)
 
-        # --- Check for Weekend/Holiday ---
-        if selected_date.weekday() >= 5: # 5 is Saturday, 6 is Sunday
-            st.warning(f"The selected date, {selected_date.strftime('%d %B %Y')}, is a weekend. NSE is closed on weekends, so no Bhavcopy data is available.")
-            st.stop() # Stop further execution
+        if full_bhavcopy_df.empty:
+            st.error("No data could be loaded for the selected range. This might be due to all days being non-trading days, network issues, or changes in NSE's data provision.")
+            return # Stop execution if no data
 
-        if selected_date in NSE_HOLIDAYS_2025:
-            st.warning(f"The selected date, {selected_date.strftime('%d %B %Y')}, is an NSE trading holiday. No Bhavcopy data is available for this day.")
-            st.stop() # Stop further execution
+        st.success(f"Successfully loaded data for {full_bhavcopy_df['SYMBOL'].nunique()} unique symbols across {full_bhavcopy_df['TIMESTAMP'].nunique()} trading days.")
 
-        with st.spinner(f"Fetching Bhavcopy for {selected_date.strftime('%d-%b-%Y')}..."):
-            raw_df = fetch_bhavcopy(selected_date)
+        # --- Individual Stock Analysis ---
+        st.header("Individual Stock Analysis")
+        all_symbols = sorted(full_bhavcopy_df['SYMBOL'].unique().tolist())
+        selected_symbol = st.selectbox(
+            "Select a Stock Symbol",
+            [''] + all_symbols, # Add an empty option at the top
+            index=0
+        )
 
-        if raw_df is not None and not raw_df.empty:
-            processed_df = process_bhavcopy(raw_df)
+        if selected_symbol:
+            # Display daily data for the selected stock
+            st.subheader(f"Daily Data for {selected_symbol} ({start_date.strftime('%d %b %Y')} to {end_date.strftime('%d %b %Y')})")
+            symbol_df = full_bhavcopy_df[full_bhavcopy_df['SYMBOL'] == selected_symbol].sort_values('TIMESTAMP').reset_index(drop=True)
+            
+            if not symbol_df.empty:
+                # Display relevant daily columns
+                st.dataframe(symbol_df[['TIMESTAMP', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'TOTTRDQTY', 'TOTALTRADES', 'DAILY_PRICE_CHANGE_PCT', 'DAILY_VOLUME_CHANGE_PCT']], use_container_width=True)
 
-            if not processed_df.empty:
-                st.success("Bhavcopy data fetched and processed successfully!")
-
-                st.header("Search Stock by Symbol")
-                stock_symbol = st.text_input("Enter Stock Symbol (e.g., RELIANCE, TCS)", "").upper().strip()
-                if stock_symbol:
-                    found_stock = processed_df[processed_df['SYMBOL'] == stock_symbol]
-                    if not found_stock.empty:
-                        st.subheader(f"Details for {stock_symbol}")
-                        st.dataframe(found_stock)
-                    else:
-                        st.warning(f"No data found for symbol: {stock_symbol} on {selected_date.strftime('%d-%b-%Y')}")
+                st.markdown("---")
+                # Display trend analysis for the selected stock based on the chosen period
+                st.subheader(f"Trend Analysis for {selected_symbol} ({trend_period} Comparison)")
+                # Pass a copy to avoid unintended modifications by get_trend_data
+                trend_df = get_trend_data(symbol_df.copy(), trend_period) 
+                
+                if not trend_df.empty:
+                    st.dataframe(trend_df, use_container_width=True)
                 else:
-                    st.info("Enter a stock symbol to view its details.")
-
-                st.header("Top Gainers and Losers")
-                if '% CHANGE' in processed_df.columns:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.subheader("Top 10 Gainers")
-                        top_gainers = processed_df.sort_values(by='% CHANGE', ascending=False).head(10)
-                        if not top_gainers.empty:
-                            st.dataframe(top_gainers[['SYMBOL', 'CLOSE', 'CHANGE', '% CHANGE', 'TOTTRDVOL']])
-                        else:
-                            st.info("No gainers found.")
-
-                    with col2:
-                        st.subheader("Top 10 Losers")
-                        top_losers = processed_df.sort_values(by='% CHANGE', ascending=True).head(10)
-                        if not top_losers.empty:
-                            st.dataframe(top_losers[['SYMBOL', 'CLOSE', 'CHANGE', '% CHANGE', 'TOTTRDVOL']])
-                        else:
-                            st.info("No losers found.")
-                else:
-                    st.info("Cannot determine top gainers/losers due to missing '% CHANGE' data.")
-
-                st.header("Top 20 High Volume Stocks")
-                if 'TOTTRDVOL' in processed_df.columns:
-                    high_volume_stocks = processed_df.sort_values(by='TOTTRDVOL', ascending=False).head(20)
-                    if not high_volume_stocks.empty:
-                        st.dataframe(high_volume_stocks[['SYMBOL', 'CLOSE', 'TOTTRDVOL', 'TOTTRDVAL']])
-                    else:
-                        st.info("No high volume stocks found.")
-                else:
-                    st.info("Cannot display high volume stocks due to missing 'TOTTRDVOL' data.")
-
-                st.header("Full Bhavcopy Data Table")
-                st.dataframe(processed_df, use_container_width=True)
-
+                    st.info(f"No {trend_period.lower()} trend data available for {selected_symbol} in the selected range (might be too short).")
             else:
-                st.warning("Processed DataFrame is empty. Please check the selected date or if the data is available.")
-        else:
-            st.error("Could not fetch or process Bhavcopy data for the selected date. This could be due to a weekend, holiday, or a change in NSE's data availability.")
+                st.warning(f"No daily data found for {selected_symbol} in the selected range.")
 
-    st.markdown("---")
-    st.caption("Developed by Gemini AI. Data sourced from NSE India.")
+        # --- Overall Trend Analysis ---
+        if not full_bhavcopy_df.empty:
+            st.header(f"Overall {trend_period} Trends (Top 20 by Total Volume in Period)")
+            
+            # Get trend data for all stocks across the selected period
+            overall_trend_df = get_trend_data(full_bhavcopy_df.copy(), trend_period)
+
+            if not overall_trend_df.empty:
+                # Identify top 20 symbols by their *total volume over the entire period*
+                # (This is a simplified aggregation, could be average daily volume etc.)
+                top_volume_symbols = overall_trend_df.groupby('SYMBOL')['TotalVolume'].sum().nlargest(20).index.tolist()
+                
+                # Filter the overall trend data to show only these top symbols
+                overall_trend_df_filtered = overall_trend_df[overall_trend_df['SYMBOL'].isin(top_volume_symbols)].copy()
+                
+                # Sort for display
+                if trend_period == "Weekly":
+                    overall_trend_df_filtered.sort_values(by=['WEEK_END_DATE', 'TotalVolume'], ascending=[False, False], inplace=True)
+                elif trend_period == "Monthly":
+                    overall_trend_df_filtered.sort_values(by=['MONTH_END_DATE', 'TotalVolume'], ascending=[False, False], inplace=True)
+                else: # Daily
+                     overall_trend_df_filtered.sort_values(by=['TIMESTAMP', 'TOTTRDQTY'], ascending=[False, False], inplace=True)
+
+                st.info(f"Displaying {trend_period.lower()} trends for top 20 symbols by total volume in the selected range.")
+                st.dataframe(overall_trend_df_filtered, use_container_width=True)
+            else:
+                st.info(f"No overall {trend_period.lower()} trend data available for the selected range.")
+
+        st.markdown("---")
+        st.caption("Developed by Gemini AI. Data sourced from NSE India (via archives.nseindia.com).")
 
 if __name__ == "__main__":
     main()
